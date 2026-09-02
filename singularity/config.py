@@ -20,7 +20,7 @@ class Settings(BaseSettings):
     alpaca_secret_key: str = ""
     alpaca_crypto_stream_url: str = "wss://stream.data.alpaca.markets/v1beta3/crypto/us"
 
-    influx_url: str = "http://localhost:8086"
+    influx_url: str = "http://localhost:47086"
     influx_token: str = ""
     influx_org: str = "singularity"
     influx_bucket_raw: str = "crypto_raw"

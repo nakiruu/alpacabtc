@@ -3,7 +3,7 @@ services:
     image: influxdb:2.7
     container_name: singularity-influx
     ports:
-      - "8086:8086"
+      - "47086:8086"
     environment:
       DOCKER_INFLUXDB_INIT_MODE: setup
       DOCKER_INFLUXDB_INIT_USERNAME: admin
@@ -26,7 +26,7 @@ services:
     image: grafana/grafana:11.2.0
     container_name: singularity-grafana
     ports:
-      - "3000:3000"
+      - "43137:3000"
     environment:
       GF_SECURITY_ADMIN_PASSWORD: change-me-please
       GF_INSTALL_PLUGINS: ""
