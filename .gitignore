@@ -21,11 +21,12 @@ build/
 
 .idea/
 .vscode/
+.claude/
 *.swp
 .DS_Store
 
 influxdb_data/
-grafana_data/
+influxdb_config/
 logs/
 *.log
 

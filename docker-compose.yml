@@ -22,20 +22,6 @@ services:
       retries: 5
     restart: unless-stopped
 
-  grafana:
-    image: grafana/grafana:11.2.0
-    container_name: singularity-grafana
-    ports:
-      - "43137:3000"
-    environment:
-      GF_SECURITY_ADMIN_PASSWORD: change-me-please
-      GF_INSTALL_PLUGINS: ""
-    volumes:
-      - ./grafana_data:/var/lib/grafana
-    depends_on:
-      - influxdb
-    restart: unless-stopped
-
   influx-init:
     build: .
     image: singularity-capture:latest
