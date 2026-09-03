@@ -35,3 +35,35 @@ services:
     depends_on:
       - influxdb
     restart: unless-stopped
+
+  influx-init:
+    build: .
+    image: singularity-capture:latest
+    container_name: singularity-influx-init
+    depends_on:
+      influxdb:
+        condition: service_healthy
+    env_file:
+      - .env
+    environment:
+      INFLUX_URL: http://influxdb:8086
+    command: ["influx-init"]
+    restart: "no"
+
+  capture:
+    image: singularity-capture:latest
+    container_name: singularity-capture
+    depends_on:
+      influxdb:
+        condition: service_healthy
+      influx-init:
+        condition: service_completed_successfully
+    env_file:
+      - .env
+    environment:
+      # Override .env's localhost — inside the compose network we reach influx by service name
+      INFLUX_URL: http://influxdb:8086
+    volumes:
+      - ./state:/app/state
+      - ./logs:/app/logs
+    restart: unless-stopped
