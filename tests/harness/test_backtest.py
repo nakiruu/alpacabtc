@@ -137,7 +137,8 @@ def test_position_lag_flip_captures_correct_return():
     assert folds  # at least one fold fits
     from singularity.harness.backtest import run_fold
     res = run_fold(flip_strategy, bars, folds[0], "1Day")
-    assert res.metrics.total_return == pytest.approx(0.21, rel=1e-6)
+    # Gross return isolates position-lag math from cost drag (which is now on by default).
+    assert res.gross_metrics.total_return == pytest.approx(0.21, rel=1e-6)
 
 
 def test_fold_result_has_both_bar_counts():

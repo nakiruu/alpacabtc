@@ -33,6 +33,7 @@ from dataclasses import dataclass
 
 from ..adapters.alpaca_crypto.history import Bar
 from . import metrics as m
+from .simulate import CostBreakdown, CostConfig, apply_costs
 from .walkforward import Fold, WalkForwardSplitter
 
 
@@ -44,7 +45,15 @@ class FoldResult:
     fold: Fold
     n_test_bars: int          # bars in the test window
     n_return_bars: int        # bars we earned returns on (n_test_bars - 1)
-    metrics: m.Metrics
+    gross_metrics: m.Metrics
+    net_metrics: m.Metrics
+    cost_breakdown: CostBreakdown
+    net_returns: list[float]  # kept so downstream can compute DSR / bootstrap
+
+    @property
+    def metrics(self) -> m.Metrics:
+        """Back-compat: unqualified `metrics` refers to net (cost-honest)."""
+        return self.net_metrics
 
 
 @dataclass(frozen=True)
@@ -53,22 +62,44 @@ class BacktestResult:
     symbol: str
     timeframe: str
     per_fold: list[FoldResult]
+    cost_config: CostConfig
 
     @property
     def n_folds(self) -> int:
         return len(self.per_fold)
 
     @property
+    def fold_sharpes_gross(self) -> list[float]:
+        return [f.gross_metrics.annualized_sharpe for f in self.per_fold]
+
+    @property
+    def fold_sharpes_net(self) -> list[float]:
+        return [f.net_metrics.annualized_sharpe for f in self.per_fold]
+
+    @property
     def fold_sharpes(self) -> list[float]:
-        return [f.metrics.annualized_sharpe for f in self.per_fold]
+        """Back-compat: net Sharpes."""
+        return self.fold_sharpes_net
+
+    @property
+    def mean_sharpe_gross(self) -> float:
+        return statistics.fmean(self.fold_sharpes_gross) if self.per_fold else 0.0
+
+    @property
+    def mean_sharpe_net(self) -> float:
+        return statistics.fmean(self.fold_sharpes_net) if self.per_fold else 0.0
 
     @property
     def mean_sharpe(self) -> float:
-        return statistics.fmean(self.fold_sharpes) if self.per_fold else 0.0
+        return self.mean_sharpe_net
 
     @property
     def n_negative_folds(self) -> int:
-        return sum(1 for x in self.fold_sharpes if x < 0)
+        return sum(1 for x in self.fold_sharpes_net if x < 0)
+
+    @property
+    def total_turnover(self) -> float:
+        return sum(f.cost_breakdown.turnover for f in self.per_fold)
 
 
 def _bar_returns(bars: list[Bar]) -> list[float]:
@@ -89,11 +120,19 @@ def _bar_returns(bars: list[Bar]) -> list[float]:
     return out
 
 
-def run_fold(strategy: Strategy, bars: list[Bar], fold: Fold, timeframe: str) -> FoldResult:
+def run_fold(
+    strategy: Strategy,
+    bars: list[Bar],
+    fold: Fold,
+    timeframe: str,
+    cost_config: CostConfig | None = None,
+) -> FoldResult:
     """Evaluate `strategy` on the TEST window of `fold`.
 
     positions[i] applies to the return earned from bars[i].close → bars[i+1].close.
-    positions[-1] is dropped (no bar after it to earn a return on).
+    positions[-1] is dropped (no bar after it to earn a return on). Cost is
+    charged at each position change and once more on forced-exit-to-flat at the
+    end of the fold.
     """
     test_bars = bars[fold.test_start_idx:fold.test_end_idx]
     positions = strategy(test_bars)
@@ -102,13 +141,19 @@ def run_fold(strategy: Strategy, bars: list[Bar], fold: Fold, timeframe: str) ->
             f"strategy returned {len(positions)} positions for {len(test_bars)} bars"
         )
     raw_returns = _bar_returns(test_bars)
-    weighted = [p * r for p, r in zip(positions, raw_returns)]
-    metrics = m.summary(weighted, timeframe=timeframe)
+    gross = [p * r for p, r in zip(positions, raw_returns)]
+    prices = [b.close for b in test_bars]
+    net, breakdown = apply_costs(
+        positions=positions, returns=raw_returns, prices=prices, config=cost_config,
+    )
     return FoldResult(
         fold=fold,
         n_test_bars=len(test_bars),
-        n_return_bars=len(weighted),
-        metrics=metrics,
+        n_return_bars=len(gross),
+        gross_metrics=m.summary(gross, timeframe=timeframe),
+        net_metrics=m.summary(net, timeframe=timeframe),
+        cost_breakdown=breakdown,
+        net_returns=net,
     )
 
 
@@ -120,14 +165,17 @@ def run_backtest(
     splitter: WalkForwardSplitter,
     symbol: str,
     timeframe: str = "1Day",
+    cost_config: CostConfig | None = None,
 ) -> BacktestResult:
     folds = splitter.folds(len(bars))
-    per_fold = [run_fold(strategy, bars, f, timeframe) for f in folds]
+    cfg = cost_config or CostConfig()
+    per_fold = [run_fold(strategy, bars, f, timeframe, cfg) for f in folds]
     return BacktestResult(
         strategy_name=strategy_name,
         symbol=symbol,
         timeframe=timeframe,
         per_fold=per_fold,
+        cost_config=cfg,
     )
 
 
