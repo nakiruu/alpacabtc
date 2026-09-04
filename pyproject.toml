@@ -30,6 +30,8 @@ influx-init = "singularity.ops.influx_init:main"
 report = "singularity.ops.report:main"
 calibrate = "singularity.costs.calibration:main"
 executor = "singularity.execution.main:main"
+reconcile = "singularity.execution.reconcile:main"
+watchdog = "singularity.execution.watchdog:main"
 
 [build-system]
 requires = ["hatchling"]

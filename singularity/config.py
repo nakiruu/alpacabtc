@@ -39,6 +39,8 @@ class Settings(BaseSettings):
     passive_t1_s: float = 10.0
     passive_t2_s: float = 60.0
     passive_t3_s: float = 180.0
+    watchdog_check_s: float = 30.0
+    heartbeat_max_age_s: float = 90.0
 
     def trades_symbols(self) -> list[str]:
         return _split_csv(self.stream_trades)

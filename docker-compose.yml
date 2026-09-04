@@ -71,3 +71,14 @@ services:
       - ./logs:/app/logs
     command: ["executor"]
     restart: unless-stopped
+
+  watchdog:
+    image: singularity-capture:latest
+    container_name: singularity-watchdog
+    env_file:
+      - .env
+    volumes:
+      - ./state:/app/state
+      - ./logs:/app/logs
+    command: ["watchdog"]
+    restart: unless-stopped

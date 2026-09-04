@@ -24,6 +24,7 @@ from ..config import get_settings
 from ..logs import configure as configure_logging
 from ..logs import get_logger
 from ..ops.state import StateStore
+from .reconcile import reconcile_once
 
 log = get_logger(__name__)
 
@@ -43,9 +44,35 @@ class Executor:
         )
         try:
             await self._verify_connectivity()
+            await self._reconcile_startup()
             await self._heartbeat_loop()
         finally:
             await self.rest.close()
+
+    async def _reconcile_startup(self) -> None:
+        """Plan §4.3: reconcile before any trading logic runs; halt on critical."""
+        assert self.rest is not None
+        log.info("executor_reconciling")
+        diff = await reconcile_once(self.rest, self.store)
+        if diff.has_critical:
+            log.critical(
+                "executor_reconcile_critical_halt",
+                alien_positions=len(diff.alien_positions),
+                note="Alpaca reports positions the state store doesn't know about. "
+                     "Refusing to start. Inspect via `docker compose run --rm executor reconcile`, "
+                     "then either adopt manually or flatten the account.",
+            )
+            raise SystemExit(2)
+        if not diff.is_clean:
+            log.warning(
+                "executor_reconcile_repaired",
+                alien_orders=len(diff.alien_orders),
+                ghost_orders=len(diff.ghost_orders),
+                ghost_positions=len(diff.ghost_positions),
+                repairs=diff.repairs,
+            )
+        else:
+            log.info("executor_reconcile_clean")
 
     async def _verify_connectivity(self) -> None:
         """Fail loud on startup if credentials or endpoint are misconfigured."""
