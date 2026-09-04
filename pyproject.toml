@@ -28,6 +28,7 @@ dev = [
 capture = "singularity.adapters.alpaca_crypto.stream:main"
 influx-init = "singularity.ops.influx_init:main"
 report = "singularity.ops.report:main"
+calibrate = "singularity.costs.calibration:main"
 
 [build-system]
 requires = ["hatchling"]
