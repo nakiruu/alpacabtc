@@ -192,13 +192,46 @@ def flat(bars: list[Bar]) -> list[float]:
 
 
 def random_binary(bars: list[Bar], seed: int = 0) -> list[float]:
-    """Random 0/1 positions from a seeded RNG.
+    """Random 0/1 positions from a seeded RNG (50/50 every bar).
 
-    Coarse "known-null" scaffolding for plan §5.3's harness self-check: after
-    cost sim lands in batch 3.2, running this strategy through the harness
-    should produce Sharpes statistically indistinguishable from zero. The
-    matched-turnover variant used for the formal null-gate test lands in batch
-    3.3 alongside the block bootstrap.
+    Coarse "known-null" — expected turnover is ~0.5 * n_bars per fold,
+    which is much higher than most real strategies. For the formal null-gate
+    test use `random_matched_turnover` instead, which preserves the strategy's
+    trading intensity.
     """
     rng = random.Random(seed)
     return [float(rng.randint(0, 1)) for _ in bars]
+
+
+def random_matched_turnover(target_turnover_per_fold: float, seed: int = 0) -> Strategy:
+    """Return a Strategy that produces 0/1 positions with approximately
+    `target_turnover_per_fold` transitions per fold.
+
+    Plan §5.3 null-gate requires "random entry, SAME TURNOVER" as the strategy
+    under test. This factory produces that null:
+      1. Run the primary strategy → observe total turnover T
+      2. Call this factory with target = T / n_folds
+      3. Run the null through the same harness
+      4. Bootstrap SR(primary) - SR(null) — reject if p-value < 0.05
+
+    Seed is incremented per fold internally, so folds are independent draws
+    but the whole run is deterministic from the initial seed.
+    """
+    counter = [0]
+
+    def strategy(bars: list[Bar]) -> list[float]:
+        rng = random.Random(seed + counter[0])
+        counter[0] += 1
+        n = len(bars)
+        if n <= 1:
+            return [0.0] * n
+        p_flip = min(1.0, target_turnover_per_fold / (n - 1))
+        pos = [0.0]
+        for _ in range(1, n):
+            if rng.random() < p_flip:
+                pos.append(1.0 - pos[-1])
+            else:
+                pos.append(pos[-1])
+        return pos
+
+    return strategy

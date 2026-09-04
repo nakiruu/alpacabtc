@@ -30,10 +30,12 @@ from .backtest import (
     buy_and_hold,
     flat,
     random_binary,
+    random_matched_turnover,
     run_backtest,
 )
 from .metrics import deflated_sharpe
 from .simulate import CostConfig
+from .stats import concat_fold_returns, paired_block_bootstrap
 from .walkforward import WalkForwardSpec, WalkForwardSplitter
 
 log = get_logger(__name__)
@@ -129,14 +131,82 @@ async def _run(args) -> int:
         test_bars=args.test_bars, advance_bars=args.advance_bars,
     )
     cost_config = _cost_config(args.cost_mode, args.spread_bps)
+    splitter = WalkForwardSplitter(spec)
     result = run_backtest(
         strategy=strategy, strategy_name=args.strategy,
-        bars=bars, splitter=WalkForwardSplitter(spec),
+        bars=bars, splitter=splitter,
         symbol=args.symbol, timeframe=args.timeframe,
         cost_config=cost_config,
     )
     _print_report(result)
+
+    # ---- Bootstrap vs buy-and-hold benchmark ----
+    if args.vs_benchmark != "none" and args.strategy != args.vs_benchmark:
+        bench = STRATEGIES[args.vs_benchmark]
+        bench_result = run_backtest(
+            strategy=bench, strategy_name=args.vs_benchmark,
+            bars=bars, splitter=splitter,
+            symbol=args.symbol, timeframe=args.timeframe,
+            cost_config=cost_config,
+        )
+        _print_bootstrap_section(
+            title=f"strategy vs benchmark ({args.vs_benchmark})",
+            result_a=result, result_b=bench_result,
+            n_boot=args.bootstrap_n, block=args.bootstrap_block,
+            timeframe=args.timeframe, seed=args.bootstrap_seed,
+        )
+
+    # ---- Null-gate test ----
+    if args.null_gate:
+        n_folds = result.n_folds or 1
+        target_turnover = result.total_turnover / n_folds
+        null_strategy = random_matched_turnover(target_turnover, seed=args.null_seed)
+        null_result = run_backtest(
+            strategy=null_strategy, strategy_name="null_matched",
+            bars=bars, splitter=splitter,
+            symbol=args.symbol, timeframe=args.timeframe,
+            cost_config=cost_config,
+        )
+        gate = _print_bootstrap_section(
+            title=f"NULL-GATE (random, matched turnover ≈ {target_turnover:.1f}/fold, seed={args.null_seed})",
+            result_a=result, result_b=null_result,
+            n_boot=args.bootstrap_n, block=args.bootstrap_block,
+            timeframe=args.timeframe, seed=args.bootstrap_seed,
+        )
+        # Gate decision: reject null → strategy is real. Fail to reject → null-indistinguishable.
+        alpha = args.gate_alpha
+        gate_pass = gate.p_value < alpha and gate.observed_diff > 0
+        print(f"\ngate ({'p<' + str(alpha):>8}) : [{'PASS' if gate_pass else 'FAIL'}]")
+        if not gate_pass:
+            print("  strategy cannot be distinguished from a random-timing null "
+                  "at the same turnover. Do not deploy.")
+        return 0 if gate_pass else 1
+
     return 0
+
+
+def _print_bootstrap_section(
+    *,
+    title: str,
+    result_a: BacktestResult,
+    result_b: BacktestResult,
+    n_boot: int,
+    block: int | None,
+    timeframe: str,
+    seed: int,
+):
+    ra = concat_fold_returns([f.net_returns for f in result_a.per_fold])
+    rb = concat_fold_returns([f.net_returns for f in result_b.per_fold])
+    boot = paired_block_bootstrap(
+        ra, rb, n_bootstrap=n_boot, block_size=block, timeframe=timeframe, seed=seed,
+    )
+    print(f"\n=== bootstrap — {title} ===")
+    print(f"n_bootstrap    : {boot.n_bootstrap}")
+    print(f"block_size     : {boot.block_size}")
+    print(f"observed diff  : {boot.observed_diff:+.3f} Sharpe (A - B)")
+    print(f"95% CI         : [{boot.ci_low:+.3f}, {boot.ci_high:+.3f}]")
+    print(f"two-sided p    : {boot.p_value:.4f}")
+    return boot
 
 
 def main() -> None:
@@ -157,6 +227,18 @@ def main() -> None:
     parser.add_argument("--val-bars", type=int, default=90)
     parser.add_argument("--test-bars", type=int, default=90)
     parser.add_argument("--advance-bars", type=int, default=90)
+    parser.add_argument("--vs-benchmark", default="buy_and_hold",
+                        choices=["buy_and_hold", "flat", "none"],
+                        help="Bootstrap Sharpe diff vs this benchmark (or 'none' to skip)")
+    parser.add_argument("--null-gate", action="store_true",
+                        help="Run random-matched-turnover null and require p<alpha to pass")
+    parser.add_argument("--gate-alpha", type=float, default=0.05,
+                        help="Significance threshold for --null-gate (default 0.05)")
+    parser.add_argument("--bootstrap-n", type=int, default=1000)
+    parser.add_argument("--bootstrap-block", type=int, default=None,
+                        help="Circular block size (default: n^(1/3))")
+    parser.add_argument("--bootstrap-seed", type=int, default=0)
+    parser.add_argument("--null-seed", type=int, default=0)
     args = parser.parse_args()
     sys.exit(asyncio.run(_run(args)))
 
