@@ -25,6 +25,7 @@ from pathlib import Path
 
 from ..adapters.alpaca_crypto.history import HistoryClient, load_bars_cached
 from ..logs import get_logger
+from ..signals.tsmom import tsmom as _make_tsmom
 from .backtest import (
     BacktestResult,
     buy_and_hold,
@@ -45,6 +46,8 @@ STRATEGIES = {
     "buy_and_hold": buy_and_hold,
     "flat": flat,
     "random": random_binary,
+    # tsmom is a factory (needs config); resolved in _run based on CLI flags.
+    "tsmom": None,
 }
 
 
@@ -102,7 +105,17 @@ async def _run(args) -> int:
     from ..logs import configure as configure_logging
     settings = get_settings()
     configure_logging(settings.log_level)
-    strategy = STRATEGIES[args.strategy]
+
+    if args.strategy == "tsmom":
+        lookbacks = tuple(int(x) for x in args.tsmom_lookbacks.split(","))
+        strategy = _make_tsmom(
+            lookbacks=lookbacks, enter=args.tsmom_enter, exit_=args.tsmom_exit,
+        )
+        # Auto-set warmup to cover longest lookback if user didn't override
+        if args.warmup_bars == 0:
+            args.warmup_bars = max(lookbacks) + 10
+    else:
+        strategy = STRATEGIES[args.strategy]
 
     start = args.start
     end = args.end
@@ -137,6 +150,7 @@ async def _run(args) -> int:
         bars=bars, splitter=splitter,
         symbol=args.symbol, timeframe=args.timeframe,
         cost_config=cost_config,
+        warmup_bars=args.warmup_bars,
     )
     _print_report(result)
 
@@ -148,6 +162,7 @@ async def _run(args) -> int:
             bars=bars, splitter=splitter,
             symbol=args.symbol, timeframe=args.timeframe,
             cost_config=cost_config,
+            warmup_bars=0,  # benchmarks don't need lookback
         )
         _print_bootstrap_section(
             title=f"strategy vs benchmark ({args.vs_benchmark})",
@@ -166,6 +181,7 @@ async def _run(args) -> int:
             bars=bars, splitter=splitter,
             symbol=args.symbol, timeframe=args.timeframe,
             cost_config=cost_config,
+            warmup_bars=0,
         )
         gate = _print_bootstrap_section(
             title=f"NULL-GATE (random, matched turnover ≈ {target_turnover:.1f}/fold, seed={args.null_seed})",
@@ -239,6 +255,15 @@ def main() -> None:
                         help="Circular block size (default: n^(1/3))")
     parser.add_argument("--bootstrap-seed", type=int, default=0)
     parser.add_argument("--null-seed", type=int, default=0)
+    parser.add_argument("--warmup-bars", type=int, default=0,
+                        help="Bars of pre-test-window history passed to strategy "
+                             "(auto-set for tsmom based on longest lookback)")
+    parser.add_argument("--tsmom-lookbacks", default="30,60,90,180",
+                        help="Comma-separated lookback windows in bars (default: 30,60,90,180)")
+    parser.add_argument("--tsmom-enter", type=float, default=0.25,
+                        help="Hysteresis enter threshold (default 0.25)")
+    parser.add_argument("--tsmom-exit", type=float, default=-0.10,
+                        help="Hysteresis exit threshold (default -0.10)")
     args = parser.parse_args()
     sys.exit(asyncio.run(_run(args)))
 

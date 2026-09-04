@@ -126,6 +126,7 @@ def run_fold(
     fold: Fold,
     timeframe: str,
     cost_config: CostConfig | None = None,
+    warmup_bars: int = 0,
 ) -> FoldResult:
     """Evaluate `strategy` on the TEST window of `fold`.
 
@@ -133,13 +134,24 @@ def run_fold(
     positions[-1] is dropped (no bar after it to earn a return on). Cost is
     charged at each position change and once more on forced-exit-to-flat at the
     end of the fold.
+
+    When `warmup_bars > 0`, the strategy sees the `warmup_bars` bars immediately
+    preceding the test window in addition to the test window itself. This is how
+    rolling-lookback signals (TSMOM etc.) get history without leaking future data —
+    strategy computes positions for the whole slice, and we slice out just the
+    test-window positions.
     """
-    test_bars = bars[fold.test_start_idx:fold.test_end_idx]
-    positions = strategy(test_bars)
-    if len(positions) != len(test_bars):
+    warmup_start = max(0, fold.test_start_idx - warmup_bars)
+    strategy_bars = bars[warmup_start:fold.test_end_idx]
+    all_positions = strategy(strategy_bars)
+    if len(all_positions) != len(strategy_bars):
         raise ValueError(
-            f"strategy returned {len(positions)} positions for {len(test_bars)} bars"
+            f"strategy returned {len(all_positions)} positions for {len(strategy_bars)} bars"
         )
+    test_positions_start = fold.test_start_idx - warmup_start
+    positions = all_positions[test_positions_start:]
+
+    test_bars = bars[fold.test_start_idx:fold.test_end_idx]
     raw_returns = _bar_returns(test_bars)
     gross = [p * r for p, r in zip(positions, raw_returns)]
     prices = [b.close for b in test_bars]
@@ -166,10 +178,11 @@ def run_backtest(
     symbol: str,
     timeframe: str = "1Day",
     cost_config: CostConfig | None = None,
+    warmup_bars: int = 0,
 ) -> BacktestResult:
     folds = splitter.folds(len(bars))
     cfg = cost_config or CostConfig()
-    per_fold = [run_fold(strategy, bars, f, timeframe, cfg) for f in folds]
+    per_fold = [run_fold(strategy, bars, f, timeframe, cfg, warmup_bars) for f in folds]
     return BacktestResult(
         strategy_name=strategy_name,
         symbol=symbol,
