@@ -74,3 +74,9 @@ def test_summary_populates_all_fields():
     assert s.annualized_sharpe != 0
     assert s.max_drawdown <= 0
     assert 0 <= s.hit_rate <= 1
+
+
+def test_unknown_timeframe_raises():
+    """Silent fallback to 365 would mislabel every intraday Sharpe."""
+    with pytest.raises(ValueError, match="unknown timeframe"):
+        annualized_sharpe([0.01, 0.02, 0.01], timeframe="15Min")

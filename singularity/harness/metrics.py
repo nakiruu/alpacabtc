@@ -34,7 +34,11 @@ class Metrics:
 
 
 def _annualization_factor(timeframe: str) -> float:
-    return math.sqrt(BARS_PER_YEAR.get(timeframe, 365))
+    if timeframe not in BARS_PER_YEAR:
+        raise ValueError(
+            f"unknown timeframe {timeframe!r}; expected one of {sorted(BARS_PER_YEAR)}"
+        )
+    return math.sqrt(BARS_PER_YEAR[timeframe])
 
 
 def annualized_sharpe(returns: list[float], timeframe: str = "1Day") -> float:
@@ -49,10 +53,7 @@ def annualized_sharpe(returns: list[float], timeframe: str = "1Day") -> float:
 
 def cumulative_return(returns: list[float]) -> float:
     """Product of (1+r) - 1."""
-    cum = 1.0
-    for r in returns:
-        cum *= 1.0 + r
-    return cum - 1.0
+    return math.prod(1.0 + r for r in returns) - 1.0
 
 
 def max_drawdown(returns: list[float]) -> float:
@@ -84,10 +85,11 @@ def summary(returns: list[float], timeframe: str = "1Day") -> Metrics:
         return Metrics(0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
     mu = statistics.fmean(returns)
     sd = statistics.stdev(returns) if len(returns) > 1 else 0.0
+    sharpe = 0.0 if sd == 0.0 else mu / sd * _annualization_factor(timeframe)
     return Metrics(
         n=len(returns),
         total_return=cumulative_return(returns),
-        annualized_sharpe=annualized_sharpe(returns, timeframe),
+        annualized_sharpe=sharpe,
         max_drawdown=max_drawdown(returns),
         hit_rate=hit_rate(returns),
         mean_return=mu,

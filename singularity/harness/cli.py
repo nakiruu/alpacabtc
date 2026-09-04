@@ -32,14 +32,20 @@ from .walkforward import WalkForwardSpec, WalkForwardSplitter
 log = get_logger(__name__)
 
 
+from .backtest import random_binary  # noqa: E402  (extends STRATEGIES below)
+
 STRATEGIES = {
     "buy_and_hold": buy_and_hold,
     "flat": flat,
+    "random": random_binary,
 }
 
 
 def _parse_date(s: str) -> datetime:
-    return datetime.strptime(s, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+    try:
+        return datetime.strptime(s, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+    except ValueError as e:
+        raise argparse.ArgumentTypeError(f"expected YYYY-MM-DD, got {s!r}") from e
 
 
 def _print_report(result: BacktestResult) -> None:
@@ -47,13 +53,13 @@ def _print_report(result: BacktestResult) -> None:
     if result.n_folds == 0:
         print("no folds fit — extend the date range")
         return
-    print(f"{'fold':>4} {'n_bars':>6} {'sharpe':>8} {'max_dd':>8} {'total_ret':>10} {'hit_rate':>8}")
+    print(f"{'fold':>4} {'n_ret':>6} {'sharpe':>8} {'max_dd':>8} {'total_ret':>10} {'hit_rate':>8}")
     for f in result.per_fold:
-        m = f.metrics
+        met = f.metrics
         print(
-            f"{f.fold.index:>4} {m.n:>6} "
-            f"{m.annualized_sharpe:>8.3f} {m.max_drawdown:>8.2%} "
-            f"{m.total_return:>10.2%} {m.hit_rate:>8.2%}"
+            f"{f.fold.index:>4} {met.n:>6} "
+            f"{met.annualized_sharpe:>8.3f} {met.max_drawdown:>8.2%} "
+            f"{met.total_return:>10.2%} {met.hit_rate:>8.2%}"
         )
     print()
     print(f"folds          : {result.n_folds}")
@@ -66,13 +72,13 @@ async def _run(args) -> int:
     from ..logs import configure as configure_logging
     settings = get_settings()
     configure_logging(settings.log_level)
-    strategy = STRATEGIES.get(args.strategy)
-    if strategy is None:
-        print(f"[fatal] unknown strategy {args.strategy!r}; try: {', '.join(STRATEGIES)}")
-        return 2
+    strategy = STRATEGIES[args.strategy]  # argparse choices already gates this
 
-    start = _parse_date(args.start)
-    end = _parse_date(args.end)
+    start = args.start  # argparse type= already parsed to datetime
+    end = args.end
+    if start >= end:
+        print(f"[fatal] --start ({start.date()}) must be before --end ({end.date()})")
+        return 2
     cache_dir = Path(args.cache_dir)
 
     async with HistoryClient(
@@ -106,8 +112,8 @@ async def _run(args) -> int:
 def main() -> None:
     parser = argparse.ArgumentParser(description="Walk-forward backtest CLI")
     parser.add_argument("--symbol", required=True, help="e.g. BTC/USD")
-    parser.add_argument("--start", required=True, help="YYYY-MM-DD")
-    parser.add_argument("--end", required=True, help="YYYY-MM-DD")
+    parser.add_argument("--start", required=True, type=_parse_date, help="YYYY-MM-DD")
+    parser.add_argument("--end", required=True, type=_parse_date, help="YYYY-MM-DD")
     parser.add_argument("--timeframe", default="1Day", choices=["1Day", "1Hour", "1Min"])
     parser.add_argument("--strategy", default="buy_and_hold", choices=list(STRATEGIES))
     parser.add_argument("--cache-dir", default="./state/bars")

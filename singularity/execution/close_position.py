@@ -17,6 +17,7 @@ from pathlib import Path
 from ..adapters.alpaca_crypto.rest import AlpacaRestClient
 from ..logs import get_logger
 from ..ops.state import StateStore
+from .reconcile import _normalize_symbol
 
 log = get_logger(__name__)
 
@@ -49,8 +50,12 @@ async def _run(args) -> int:
         except Exception:
             log.exception("close_get_orders_failed")
             open_orders = []
+        target = _normalize_symbol(args.symbol)
         for o in open_orders:
-            if o.get("symbol") == args.symbol:
+            # Alpaca sometimes returns "BTCUSD" and sometimes "BTC/USD" for the same
+            # instrument. Normalize both sides so we don't leave orphaned resting
+            # orders that could fight the close.
+            if _normalize_symbol(o.get("symbol") or "") == target:
                 try:
                     await rest.cancel_order(o["id"])
                     print(f"canceled resting order {o['id']}")

@@ -12,8 +12,9 @@ runs — safe to inspect or gitignore.
 
 from __future__ import annotations
 
-import asyncio
+import hashlib
 import json
+import os
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -42,20 +43,29 @@ class HistoryClient:
         base_url: str | None = None,
         timeout_s: float = 30.0,
     ) -> None:
-        self._client = httpx.AsyncClient(
-            base_url=base_url or self.BASE_URL,
-            headers={
-                "APCA-API-KEY-ID": api_key,
-                "APCA-API-SECRET-KEY": secret_key,
-                "Accept": "application/json",
-            },
-            timeout=timeout_s,
-        )
+        # Store config only; open the httpx client in __aenter__ so a construct-
+        # without-context-manager path can't leak an open connection pool.
+        self._api_key = api_key
+        self._secret_key = secret_key
+        self._base_url = base_url or self.BASE_URL
+        self._timeout_s = timeout_s
+        self._client: httpx.AsyncClient | None = None
 
     async def close(self) -> None:
-        await self._client.aclose()
+        if self._client is not None:
+            await self._client.aclose()
+            self._client = None
 
     async def __aenter__(self) -> "HistoryClient":
+        self._client = httpx.AsyncClient(
+            base_url=self._base_url,
+            headers={
+                "APCA-API-KEY-ID": self._api_key,
+                "APCA-API-SECRET-KEY": self._secret_key,
+                "Accept": "application/json",
+            },
+            timeout=self._timeout_s,
+        )
         return self
 
     async def __aexit__(self, *_exc: object) -> None:
@@ -70,14 +80,16 @@ class HistoryClient:
         limit_per_page: int = 10_000,
     ) -> list[Bar]:
         """Fetch all bars in [start, end], following pagination. Returns sorted by ts."""
+        if self._client is None:
+            raise RuntimeError("HistoryClient not opened; use `async with HistoryClient(...) as c`")
         out: list[Bar] = []
         page_token: str | None = None
         while True:
             params: dict[str, Any] = {
                 "symbols": symbol,
                 "timeframe": timeframe,
-                "start": start.strftime("%Y-%m-%dT%H:%M:%SZ"),
-                "end": end.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                "start": _rfc3339(start),
+                "end": _rfc3339(end),
                 "limit": limit_per_page,
             }
             if page_token:
@@ -86,13 +98,17 @@ class HistoryClient:
             r.raise_for_status()
             body = r.json()
             raw_bars = (body.get("bars") or {}).get(symbol) or []
-            for b in raw_bars:
-                out.append(_parse_bar(b))
+            out.extend(_parse_bar(b) for b in raw_bars)
             page_token = body.get("next_page_token")
             if not page_token:
                 break
         out.sort(key=lambda x: x.ts)
         return out
+
+
+def _rfc3339(dt: datetime) -> str:
+    """RFC3339 with microseconds, always UTC. Preserves precision Alpaca can use."""
+    return dt.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
 def _parse_bar(b: dict) -> Bar:
@@ -113,8 +129,20 @@ def _parse_ts(s: str) -> datetime:
 
 
 def _cache_path(cache_dir: Path, symbol: str, timeframe: str, start: datetime, end: datetime) -> Path:
+    """Cache key includes full ISO timestamps hashed short so intraday-varying inputs
+    don't collide onto a single file, but the human-readable prefix stays useful."""
     sym = symbol.replace("/", "-")
-    return cache_dir / f"{sym}_{timeframe}_{start.date()}_{end.date()}.json"
+    key = f"{sym}|{timeframe}|{_rfc3339(start)}|{_rfc3339(end)}"
+    digest = hashlib.sha256(key.encode()).hexdigest()[:12]
+    return cache_dir / f"{sym}_{timeframe}_{start.date()}_{end.date()}_{digest}.json"
+
+
+def _atomic_write_json(path: Path, obj: Any) -> None:
+    """Write to a sibling tempfile then rename. Prevents corrupt cache from a crash mid-write."""
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    with tmp.open("w", encoding="utf-8") as f:
+        json.dump(obj, f)
+    os.replace(tmp, path)
 
 
 async def load_bars_cached(
@@ -130,12 +158,15 @@ async def load_bars_cached(
     cache_dir.mkdir(parents=True, exist_ok=True)
     path = _cache_path(cache_dir, symbol, timeframe, start, end)
     if path.exists() and not force_refresh:
-        with path.open("r", encoding="utf-8") as f:
-            raw = json.load(f)
-        return [Bar(ts=_parse_ts(r["ts"]), open=r["open"], high=r["high"],
-                    low=r["low"], close=r["close"], volume=r["volume"]) for r in raw]
+        try:
+            with path.open("r", encoding="utf-8") as f:
+                raw = json.load(f)
+            return [Bar(ts=_parse_ts(r["ts"]), open=r["open"], high=r["high"],
+                        low=r["low"], close=r["close"], volume=r["volume"]) for r in raw]
+        except (json.JSONDecodeError, KeyError, ValueError):
+            # Corrupt or incompatible cache — fall through to refetch.
+            path.unlink(missing_ok=True)
     bars = await client.bars(symbol, start, end, timeframe)
     serializable = [{**asdict(b), "ts": b.ts.isoformat()} for b in bars]
-    with path.open("w", encoding="utf-8") as f:
-        json.dump(serializable, f)
+    _atomic_write_json(path, serializable)
     return bars
