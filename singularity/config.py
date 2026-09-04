@@ -19,6 +19,7 @@ class Settings(BaseSettings):
     alpaca_api_key: str = ""
     alpaca_secret_key: str = ""
     alpaca_crypto_stream_url: str = "wss://stream.data.alpaca.markets/v1beta3/crypto/us"
+    alpaca_trading_url: str = "https://paper-api.alpaca.markets"
 
     influx_url: str = "http://localhost:47086"
     influx_token: str = ""
@@ -32,6 +33,12 @@ class Settings(BaseSettings):
 
     book_feature_cadence_s: float = 1.0
     log_level: str = "INFO"
+
+    state_db_path: str = "./state/singularity.db"
+    executor_heartbeat_s: float = 15.0
+    passive_t1_s: float = 10.0
+    passive_t2_s: float = 60.0
+    passive_t3_s: float = 180.0
 
     def trades_symbols(self) -> list[str]:
         return _split_csv(self.stream_trades)

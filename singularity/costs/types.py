@@ -30,6 +30,19 @@ class TimeInForce(str, Enum):
     IOC = "ioc"
 
 
+class OrderStatus(str, Enum):
+    """Lifecycle states we track locally. Alpaca has richer status vocabulary
+    (accepted, partially_filled, done_for_day, etc.) — the reconcile loop
+    maps those onto ours."""
+
+    PENDING = "pending"        # persisted intent, not yet submitted to Alpaca
+    SUBMITTED = "submitted"    # Alpaca acknowledged
+    PARTIAL = "partial"        # some fills received, order still live
+    FILLED = "filled"
+    CANCELED = "canceled"
+    REJECTED = "rejected"
+
+
 @dataclass(frozen=True)
 class Cost:
     """Per-round-trip cost decomposition, all in bps of notional at mid."""

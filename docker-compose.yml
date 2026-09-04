@@ -53,3 +53,21 @@ services:
       - ./state:/app/state
       - ./logs:/app/logs
     restart: unless-stopped
+
+  executor:
+    image: singularity-capture:latest
+    container_name: singularity-executor
+    depends_on:
+      influxdb:
+        condition: service_healthy
+      influx-init:
+        condition: service_completed_successfully
+    env_file:
+      - .env
+    environment:
+      INFLUX_URL: http://influxdb:8086
+    volumes:
+      - ./state:/app/state
+      - ./logs:/app/logs
+    command: ["executor"]
+    restart: unless-stopped
