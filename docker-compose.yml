@@ -7,11 +7,11 @@ services:
     environment:
       DOCKER_INFLUXDB_INIT_MODE: setup
       DOCKER_INFLUXDB_INIT_USERNAME: admin
-      DOCKER_INFLUXDB_INIT_PASSWORD: change-me-please
-      DOCKER_INFLUXDB_INIT_ORG: singularity
-      DOCKER_INFLUXDB_INIT_BUCKET: crypto_raw
+      DOCKER_INFLUXDB_INIT_PASSWORD: ${INFLUX_ADMIN_PASSWORD:?set INFLUX_ADMIN_PASSWORD in .env}
+      DOCKER_INFLUXDB_INIT_ORG: ${INFLUX_ORG:-singularity}
+      DOCKER_INFLUXDB_INIT_BUCKET: ${INFLUX_BUCKET_RAW:-crypto_raw}
       DOCKER_INFLUXDB_INIT_RETENTION: 90d
-      DOCKER_INFLUXDB_INIT_ADMIN_TOKEN: dev-token-change-me
+      DOCKER_INFLUXDB_INIT_ADMIN_TOKEN: ${INFLUX_TOKEN:?set INFLUX_TOKEN in .env}
     volumes:
       - ./influxdb_data:/var/lib/influxdb2
       - ./influxdb_config:/etc/influxdb2
@@ -47,16 +47,17 @@ services:
     env_file:
       - .env
     environment:
-      # Override .env's localhost — inside the compose network we reach influx by service name
+      # Inside the compose network we reach influx by service name, not host port
       INFLUX_URL: http://influxdb:8086
-    volumes:
-      - ./state:/app/state
-      - ./logs:/app/logs
     restart: unless-stopped
 
   executor:
     image: singularity-capture:latest
     container_name: singularity-executor
+    # Run as Unraid's nobody:users so bind-mounted state/logs are writable
+    # without host-side chown. On non-Unraid Docker hosts, chown ./state and
+    # ./logs to match (or override via `user:` in a local compose override).
+    user: "99:100"
     depends_on:
       influxdb:
         condition: service_healthy
@@ -75,6 +76,7 @@ services:
   watchdog:
     image: singularity-capture:latest
     container_name: singularity-watchdog
+    user: "99:100"
     env_file:
       - .env
     volumes:
