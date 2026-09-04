@@ -112,25 +112,28 @@ def round_trip_cost(
 
 
 # ---------------------------------------------------------------------------
-# Fill probability — plan §3.2 placeholder until Phase 2 gives us empirical fits
+# Fill probability — hazard-rate placeholder until Phase 2 empirical fit.
+#
+# Model: P(fill by t | offset) = 1 - exp(-t / τ(offset))
+#        τ(offset) = FILL_TAU_S * exp(|offset| / FILL_OFFSET_SCALE_BPS)
+#
+# This is the Cont-Kukanov-Stoikov (2014) style survival form. At offset=0 the
+# time constant is FILL_TAU_S (60s → 63% fill by then). Every FILL_OFFSET_SCALE_BPS
+# of extra offset multiplies τ by e (~2.7×). Phase 2 will re-fit these two
+# constants (and possibly add a vol_regime dependence) against realized fills.
 # ---------------------------------------------------------------------------
 
-def fill_prob(offset_bps: float, wait_seconds: float, vol_regime: str | None = None) -> float:
-    """Probability a resting order at `offset_bps` inside the touch fills within `wait_seconds`.
+FILL_TAU_S = 60.0
+FILL_OFFSET_SCALE_BPS = 5.0
 
-    Placeholder shape (plan §3.2 literal): ~60% at the touch by 60s, saturating
-    to ~90% at 5 minutes, with an exponential offset penalty. Replace once Phase 2
-    logs enough resting orders to fit an empirical curve.
-    """
+
+def fill_prob(offset_bps: float, wait_seconds: float, vol_regime: str | None = None) -> float:
+    """Probability a resting order at `offset_bps` inside the touch fills within `wait_seconds`."""
     del vol_regime  # placeholder — vol-regime conditioning waits for real data
     if wait_seconds <= 0:
         return 0.0
-    if wait_seconds < 60.0:
-        base = 0.6 * (wait_seconds / 60.0)
-    else:
-        base = 0.6 + 0.3 * min(1.0, (wait_seconds - 60.0) / 240.0)
-    offset_penalty = math.exp(-abs(offset_bps) / 5.0)  # ~5 bps half-life
-    return max(0.0, min(1.0, base * offset_penalty))
+    tau = FILL_TAU_S * math.exp(abs(offset_bps) / FILL_OFFSET_SCALE_BPS)
+    return 1.0 - math.exp(-wait_seconds / tau)
 
 
 # ---------------------------------------------------------------------------
@@ -142,19 +145,16 @@ def fill_prob(offset_bps: float, wait_seconds: float, vol_regime: str | None = N
 # Rationale: prices diffuse as σ√t under a martingale null. A missed passive
 # order experiences that same diffusion against it on average, because the
 # reason it missed is that the market moved through where it was resting.
-# Empirically the drift is closer to 0.5–1× the σ√t baseline; we start with
-# ADVERSE_K = 0.7 as a defensible mid-range prior.
+# Published BTC intraday adverse-selection estimates typically land in the
+# 0.4–0.6 range on 1s scale; ADVERSE_K = 0.5 sits in the middle of that band.
+# Phase 2 calibration re-fits per symbol and possibly per vol regime.
 #
 # Alternatives (see git history for options b and c in the original TODO):
 #   (b) offset-scaled — captures "picked-off maker" but ignores time-in-book
 #   (c) empirical replay — best; unlocked once Phase 2 logs missed orders
-#
-# calibration.py should compare model output against realized subsequent moves
-# on actually-missed orders (Phase 2 wiring) and re-fit ADVERSE_K per symbol
-# and possibly per vol regime.
 # ---------------------------------------------------------------------------
 
-ADVERSE_K = 0.7
+ADVERSE_K = 0.5
 
 
 def adverse_selection_cost(

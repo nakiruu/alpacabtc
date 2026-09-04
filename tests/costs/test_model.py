@@ -161,6 +161,20 @@ def test_fill_prob_bounded():
     assert 0 <= p <= 1
 
 
+def test_fill_prob_at_tau_is_one_minus_exp():
+    # By construction: at offset=0 and wait=FILL_TAU_S, P = 1 - 1/e ≈ 0.632
+    from singularity.costs.model import FILL_TAU_S
+    p = fill_prob(offset_bps=0, wait_seconds=FILL_TAU_S)
+    assert p == pytest.approx(1 - 1 / math.e, rel=1e-6)
+
+
+def test_fill_prob_offset_sign_symmetric():
+    # Model uses |offset|; +5 and -5 must return the same probability
+    assert fill_prob(offset_bps=5, wait_seconds=60) == fill_prob(
+        offset_bps=-5, wait_seconds=60
+    )
+
+
 # ---------- Adverse selection ----------
 
 def test_adverse_selection_zero_wait_is_zero():
