@@ -12,8 +12,10 @@ import pytest
 
 from singularity.costs import fees
 from singularity.costs.model import (
+    ADVERSE_K,
     BookSnapshot,
     _vwap_walk,
+    adverse_selection_cost,
     fill_prob,
     one_way_cost,
     round_trip_cost,
@@ -157,3 +159,55 @@ def test_fill_prob_offset_penalty():
 def test_fill_prob_bounded():
     p = fill_prob(offset_bps=0, wait_seconds=100_000)
     assert 0 <= p <= 1
+
+
+# ---------- Adverse selection ----------
+
+def test_adverse_selection_zero_wait_is_zero():
+    c = adverse_selection_cost(
+        side=Side.BUY, offset_bps=1.0, wait_seconds=0.0, realized_vol_bps_per_sqrt_s=1.0
+    )
+    assert c == 0.0
+
+
+def test_adverse_selection_zero_vol_is_zero():
+    c = adverse_selection_cost(
+        side=Side.BUY, offset_bps=1.0, wait_seconds=60.0, realized_vol_bps_per_sqrt_s=0.0
+    )
+    assert c == 0.0
+
+
+def test_adverse_selection_scales_as_sqrt_wait():
+    a = adverse_selection_cost(
+        side=Side.BUY, offset_bps=1.0, wait_seconds=60.0, realized_vol_bps_per_sqrt_s=1.0
+    )
+    b = adverse_selection_cost(
+        side=Side.BUY, offset_bps=1.0, wait_seconds=240.0, realized_vol_bps_per_sqrt_s=1.0
+    )
+    # 4x wait → 2x cost (sqrt scaling)
+    assert b == pytest.approx(2 * a)
+
+
+def test_adverse_selection_scales_linearly_in_vol():
+    a = adverse_selection_cost(
+        side=Side.BUY, offset_bps=0.0, wait_seconds=60.0, realized_vol_bps_per_sqrt_s=1.0
+    )
+    b = adverse_selection_cost(
+        side=Side.BUY, offset_bps=0.0, wait_seconds=60.0, realized_vol_bps_per_sqrt_s=3.0
+    )
+    assert b == pytest.approx(3 * a)
+
+
+def test_adverse_selection_side_symmetric():
+    kwargs = dict(offset_bps=1.0, wait_seconds=60.0, realized_vol_bps_per_sqrt_s=1.0)
+    assert adverse_selection_cost(side=Side.BUY, **kwargs) == adverse_selection_cost(
+        side=Side.SELL, **kwargs
+    )
+
+
+def test_adverse_selection_reference_value():
+    # k=0.7, vol=1bps/√s, wait=60s → 0.7 * 1 * √60 ≈ 5.42 bps
+    c = adverse_selection_cost(
+        side=Side.BUY, offset_bps=0.0, wait_seconds=60.0, realized_vol_bps_per_sqrt_s=1.0
+    )
+    assert c == pytest.approx(ADVERSE_K * math.sqrt(60), rel=1e-6)

@@ -134,37 +134,27 @@ def fill_prob(offset_bps: float, wait_seconds: float, vol_regime: str | None = N
 
 
 # ---------------------------------------------------------------------------
-# Adverse selection cost — plan §3.2:
-#   "assume the 40% you miss are adversely selected — the market moved away
-#    from you. Model the miss cost as the subsequent price move, not as zero."
+# Adverse selection cost.
 #
-# TODO — user contribution: implement adverse_selection_cost below.
+# Shape (a) from plan §3.2 — volatility-scaled diffusion:
+#     miss_bps = ADVERSE_K * σ_1s * √wait_seconds
 #
-# Signature is fixed (calibration and expected-cost composition depend on it).
-# What you choose is the *shape* of the miss cost.
+# Rationale: prices diffuse as σ√t under a martingale null. A missed passive
+# order experiences that same diffusion against it on average, because the
+# reason it missed is that the market moved through where it was resting.
+# Empirically the drift is closer to 0.5–1× the σ√t baseline; we start with
+# ADVERSE_K = 0.7 as a defensible mid-range prior.
 #
-# Three defensible starting points:
+# Alternatives (see git history for options b and c in the original TODO):
+#   (b) offset-scaled — captures "picked-off maker" but ignores time-in-book
+#   (c) empirical replay — best; unlocked once Phase 2 logs missed orders
 #
-#   (a) Volatility-scaled random walk.
-#       miss_bps = k · σ_1s · √wait_seconds
-#       Prices diffuse ~σ·√t; a missed passive order tracks the same diffusion
-#       against you on average. k around 0.5–1.0. Clean and parameter-thin.
-#
-#   (b) Fraction of the offset you tried to earn.
-#       miss_bps = k · offset_bps  (k around 1.0–1.5)
-#       If you set an aggressive offset (tight to mid) you're being picked off
-#       by informed flow; the deeper you rest the more selected the misses are.
-#       Reflects the "picked-off maker" empirical finding directly.
-#
-#   (c) Empirical replay.
-#       miss_bps = mean subsequent T-second return of the losing side, from
-#       Phase 0 trade tape. Best but requires wiring — do (a) or (b) now and
-#       swap later.
-#
-# What matters: whatever you pick, the calibration loop in calibration.py
-# should be able to *check* it against actual missed-order outcomes once Phase 2
-# fills exist. Keep the parameters small and named so they can be re-fit.
+# calibration.py should compare model output against realized subsequent moves
+# on actually-missed orders (Phase 2 wiring) and re-fit ADVERSE_K per symbol
+# and possibly per vol regime.
 # ---------------------------------------------------------------------------
+
+ADVERSE_K = 0.7
 
 
 def adverse_selection_cost(
@@ -177,15 +167,15 @@ def adverse_selection_cost(
     """Expected cost in bps when a resting passive order fails to fill.
 
     Args:
-        side: intended side of the resting order
-        offset_bps: how far inside the touch the order rested (positive)
+        side: intended side of the resting order (unused — model is side-symmetric)
+        offset_bps: how far inside the touch the order rested (unused in shape (a))
         wait_seconds: how long it waited before we gave up
         realized_vol_bps_per_sqrt_s: 1-second realized vol scale in bps
 
     Returns:
         Expected bps of cost from the miss. Positive = adverse.
     """
-    del side  # placeholder if the chosen model is side-symmetric
-    raise NotImplementedError(
-        "Implement adverse_selection_cost — see TODO block above for three design shapes."
-    )
+    del side, offset_bps  # shape (a) doesn't use these
+    if wait_seconds <= 0 or realized_vol_bps_per_sqrt_s <= 0:
+        return 0.0
+    return ADVERSE_K * realized_vol_bps_per_sqrt_s * math.sqrt(wait_seconds)
