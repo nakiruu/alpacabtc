@@ -19,6 +19,8 @@ import asyncio
 import signal
 from pathlib import Path
 
+from ..adapters.alpaca_crypto.market_data import MarketDataClient
+from ..adapters.alpaca_crypto.orders import OrderAdapter
 from ..adapters.alpaca_crypto.rest import AlpacaRestClient
 from ..adapters.alpaca_crypto.trade_updates import TradeUpdatesClient
 from ..config import get_settings
@@ -27,6 +29,7 @@ from ..logs import get_logger
 from ..ops.state import StateStore
 from .fill_handler import FillHandler
 from .reconcile import reconcile_once
+from .supervisor import BracketSupervisor
 
 log = get_logger(__name__)
 
@@ -41,9 +44,11 @@ class Executor:
         self.settings = get_settings()
         self.store = StateStore(Path(self.settings.state_db_path))
         self.rest: AlpacaRestClient | None = None
+        self.market: MarketDataClient | None = None
         self._stop = asyncio.Event()
         self._fill_handler = FillHandler(self.store)
         self._trade_updates: TradeUpdatesClient | None = None
+        self._supervisor: BracketSupervisor | None = None
 
     async def run(self) -> None:
         self.rest = AlpacaRestClient(
@@ -51,22 +56,31 @@ class Executor:
             secret_key=self.settings.alpaca_secret_key,
             base_url=self.settings.alpaca_trading_url,
         )
+        self.market = MarketDataClient(
+            api_key=self.settings.alpaca_api_key,
+            secret_key=self.settings.alpaca_secret_key,
+        )
+        adapter = OrderAdapter(self.rest, self.store)
         self._trade_updates = TradeUpdatesClient(
             api_key=self.settings.alpaca_api_key,
             secret_key=self.settings.alpaca_secret_key,
             stream_url=_trade_updates_url(self.settings.alpaca_trading_url),
             on_event=self._fill_handler.handle,
         )
+        self._supervisor = BracketSupervisor(
+            rest=self.rest, adapter=adapter, market=self.market, store=self.store,
+        )
         try:
             await self._verify_connectivity()
             await self._reconcile_startup()
-            # Run heartbeat + trade updates concurrently. Either failing is fatal;
-            # container restart-policy brings us back and reconcile picks up the pieces.
+            # heartbeat + trade updates + bracket supervisor, all concurrent
             await asyncio.gather(
                 self._heartbeat_loop(),
                 self._trade_updates.run(),
+                self._supervisor.run(),
             )
         finally:
+            await self.market.close()
             await self.rest.close()
 
     async def _reconcile_startup(self) -> None:
@@ -120,6 +134,8 @@ class Executor:
         self._stop.set()
         if self._trade_updates is not None:
             self._trade_updates.request_stop()
+        if self._supervisor is not None:
+            self._supervisor.request_stop()
 
 
 def _install_signal_handlers(exe: Executor) -> None:

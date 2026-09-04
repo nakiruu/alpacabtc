@@ -67,8 +67,36 @@ CREATE TABLE IF NOT EXISTS heartbeats (
     last_beat   TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS activities (
+    id              TEXT PRIMARY KEY,
+    activity_type   TEXT NOT NULL,
+    alpaca_order_id TEXT,
+    symbol          TEXT,
+    side            TEXT,
+    qty             REAL,
+    price           REAL,
+    fee_asset       TEXT,
+    fee_amount      REAL,
+    activity_date   TEXT NOT NULL,
+    raw_json        TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS brackets (
+    symbol       TEXT PRIMARY KEY,
+    stop_price   REAL NOT NULL,
+    target_price REAL NOT NULL,
+    atr_used     REAL NOT NULL,
+    k_stop       REAL NOT NULL,
+    m_target     REAL NOT NULL,
+    entry_price  REAL NOT NULL,
+    created_at   TEXT NOT NULL,
+    updated_at   TEXT NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS ix_orders_status ON orders(status);
 CREATE INDEX IF NOT EXISTS ix_fills_order_id ON fills(order_id);
+CREATE INDEX IF NOT EXISTS ix_activities_alpaca_order ON activities(alpaca_order_id);
+CREATE INDEX IF NOT EXISTS ix_activities_type_date ON activities(activity_type, activity_date);
 """
 
 
@@ -250,6 +278,101 @@ class StateStore:
         if last is None:
             return None
         return (datetime.now(timezone.utc) - last).total_seconds()
+
+    # ---- Activities (CFEE + FILL from Alpaca Activities API) ----
+
+    def save_activity(self, activity: dict) -> None:
+        """Persist an Alpaca activity payload. Idempotent on activity id."""
+        import json
+        with self._connect() as c:
+            c.execute(
+                """
+                INSERT OR IGNORE INTO activities (
+                    id, activity_type, alpaca_order_id, symbol, side,
+                    qty, price, fee_asset, fee_amount, activity_date, raw_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    activity["id"],
+                    activity["activity_type"],
+                    activity.get("order_id"),
+                    activity.get("symbol"),
+                    activity.get("side"),
+                    _as_float(activity.get("qty")),
+                    _as_float(activity.get("price")),
+                    activity.get("fee_asset"),
+                    _as_float(activity.get("fee")),
+                    activity.get("date") or activity.get("transaction_time"),
+                    json.dumps(activity),
+                ),
+            )
+
+    def latest_activity_date(self, activity_type: str) -> str | None:
+        with self._connect() as c:
+            row = c.execute(
+                "SELECT MAX(activity_date) AS d FROM activities WHERE activity_type=?",
+                (activity_type,),
+            ).fetchone()
+        return row["d"] if row and row["d"] else None
+
+    def activities_by_alpaca_order(self, alpaca_order_id: str) -> list[sqlite3.Row]:
+        with self._connect() as c:
+            return c.execute(
+                "SELECT * FROM activities WHERE alpaca_order_id=? ORDER BY activity_date",
+                (alpaca_order_id,),
+            ).fetchall()
+
+    # ---- Brackets ----
+
+    def upsert_bracket(
+        self,
+        symbol: str,
+        stop_price: float,
+        target_price: float,
+        atr_used: float,
+        k_stop: float,
+        m_target: float,
+        entry_price: float,
+    ) -> None:
+        with self._connect() as c:
+            c.execute(
+                """
+                INSERT INTO brackets (symbol, stop_price, target_price, atr_used,
+                                      k_stop, m_target, entry_price, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(symbol) DO UPDATE SET
+                    stop_price=excluded.stop_price,
+                    target_price=excluded.target_price,
+                    atr_used=excluded.atr_used,
+                    k_stop=excluded.k_stop,
+                    m_target=excluded.m_target,
+                    entry_price=excluded.entry_price,
+                    updated_at=excluded.updated_at
+                """,
+                (symbol, stop_price, target_price, atr_used, k_stop, m_target,
+                 entry_price, _now_iso(), _now_iso()),
+            )
+
+    def get_bracket(self, symbol: str) -> sqlite3.Row | None:
+        with self._connect() as c:
+            return c.execute("SELECT * FROM brackets WHERE symbol=?", (symbol,)).fetchone()
+
+    def all_brackets(self) -> list[sqlite3.Row]:
+        with self._connect() as c:
+            return c.execute("SELECT * FROM brackets").fetchall()
+
+    def delete_bracket(self, symbol: str) -> None:
+        with self._connect() as c:
+            c.execute("DELETE FROM brackets WHERE symbol=?", (symbol,))
+
+
+def _as_float(v: Any) -> float | None:
+    if v is None:
+        return None
+    try:
+        return float(v)
+    except (ValueError, TypeError):
+        return None
 
 
 def row_to_intent(row: sqlite3.Row) -> OrderIntent:

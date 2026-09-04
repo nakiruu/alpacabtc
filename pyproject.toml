@@ -32,6 +32,8 @@ calibrate = "singularity.costs.calibration:main"
 executor = "singularity.execution.main:main"
 reconcile = "singularity.execution.reconcile:main"
 watchdog = "singularity.execution.watchdog:main"
+activities-sync = "singularity.execution.activities:main"
+place-test-order = "singularity.execution.place_order:main"
 
 [build-system]
 requires = ["hatchling"]
