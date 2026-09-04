@@ -16,19 +16,25 @@ from __future__ import annotations
 import argparse
 import sys
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 from influxdb_client import InfluxDBClient
 
 from ..config import get_settings
 from ..logs import configure as configure_logging
 from ..logs import get_logger
+from ..ops.state import StateStore
 
 log = get_logger(__name__)
 
 # Phase 0 gate — plan §2
 GAP_BUDGET_FRACTION = 0.005  # <0.5% gap time
 STALENESS_ALERT_S = 300.0    # 5min without any message on a subscribed symbol
+
+# Phase 2 gates — plan §4.3
+HEARTBEAT_ALERT_S = 90.0     # executor heartbeat max age (matches watchdog default)
+STRANDED_ORDER_MAX_AGE_S = 600.0  # SUBMITTED/PARTIAL orders older than this are stranded
 
 
 @dataclass
@@ -135,7 +141,7 @@ def report(window: str = "24h") -> int:
     window_s = _window_seconds(window)
     gate_budget_s = GAP_BUDGET_FRACTION * window_s
 
-    print(f"\n=== singularity Phase 0 report — window {window} ({now.isoformat()}) ===\n")
+    print(f"\n=== singularity report — window {window} ({now.isoformat()}) ===\n")
 
     try:
         client = InfluxDBClient(
@@ -198,12 +204,82 @@ def report(window: str = "24h") -> int:
     print(f"  budget        : {gate_budget_s:.1f}s ({budget_pct:.2f}% of window)")
     print(f"  gate          : [{gate_status}]")
 
+    # --- Phase 2: execution state (from StateStore) ---
+    failing += _phase2_section(settings, now)
+
     print()
     if failing:
         print(f"result: FAIL ({failing} gate breach{'es' if failing != 1 else ''})")
         return 1
     print("result: OK")
     return 0
+
+
+def _phase2_section(settings, now: datetime) -> int:
+    """Print orders/fills/positions/heartbeat sections. Returns count of gate breaches."""
+    failing = 0
+    db_path = Path(settings.state_db_path)
+    if not db_path.exists():
+        print("\nphase 2 (execution state)\n  (state DB not yet initialized — executor hasn't run here)")
+        return 0
+
+    store = StateStore(db_path)
+
+    # Heartbeat freshness
+    print("\nheartbeats")
+    for process in ("executor", "watchdog"):
+        age = store.heartbeat_age_s(process)
+        if age is None:
+            print(f"  {process:<10} — never seen")
+            if process == "executor":
+                failing += 1
+        else:
+            marker = "  [FAIL]" if age > HEARTBEAT_ALERT_S else ""
+            if age > HEARTBEAT_ALERT_S and process == "executor":
+                failing += 1
+            print(f"  {process:<10} {age:>8.1f}s ago{marker}")
+
+    # Open orders + stranded check
+    open_orders = store.open_orders()
+    stranded = []
+    for row in open_orders:
+        try:
+            submitted = datetime.fromisoformat(row["submitted_at"]).astimezone(timezone.utc)
+        except ValueError:
+            continue
+        age = (now - submitted).total_seconds()
+        if age > STRANDED_ORDER_MAX_AGE_S:
+            stranded.append((row, age))
+    print(f"\norders (open)")
+    print(f"  count         : {len(open_orders)}")
+    print(f"  stranded (>{int(STRANDED_ORDER_MAX_AGE_S)}s): {len(stranded)}{'  [FAIL]' if stranded else ''}")
+    if stranded:
+        failing += 1
+        for row, age in stranded[:5]:
+            print(f"    - {row['id']}  {row['symbol']}  {row['side']}  age={age:.0f}s status={row['status']}")
+
+    # Fills + maker ratio
+    recent_fills = store.fills_between(
+        now - timedelta(days=7), now
+    )
+    n_fills = len(recent_fills)
+    n_maker = sum(1 for r in recent_fills if r["is_maker"])
+    maker_ratio = (n_maker / n_fills) if n_fills else None
+    print(f"\nfills (last 7d)")
+    print(f"  total         : {n_fills}")
+    print(f"  maker ratio   : {maker_ratio:.2%}" if maker_ratio is not None else "  maker ratio   : n/a")
+
+    # Positions
+    positions = store.all_positions()
+    print(f"\npositions")
+    if not positions:
+        print("  (flat)")
+    else:
+        print(f"  {'symbol':<12} {'qty':>12} {'avg_entry':>12}")
+        for p in positions:
+            print(f"  {p['symbol']:<12} {p['qty']:>12.6f} {p['avg_entry_price']:>12.2f}")
+
+    return failing
 
 
 def main() -> None:

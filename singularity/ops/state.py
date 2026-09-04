@@ -177,6 +177,24 @@ class StateStore:
                 (order_id,),
             ).fetchall()
 
+    def update_fill_fee(
+        self, order_id: str, filled_at: datetime, fee_asset: str, fee_amount: float
+    ) -> None:
+        """Update fee_asset/fee_amount on a specific fill. Used by CFEE reconciliation
+        (T+1) when Alpaca posts fee activities that weren't on the original fill event."""
+        fill_id = f"{order_id}:{_iso(filled_at)}"
+        with self._connect() as c:
+            c.execute(
+                "UPDATE fills SET fee_asset=?, fee_amount=? WHERE id=?",
+                (fee_asset, fee_amount, fill_id),
+            )
+
+    def all_fills(self, limit: int = 1000) -> list[sqlite3.Row]:
+        with self._connect() as c:
+            return c.execute(
+                "SELECT * FROM fills ORDER BY filled_at DESC LIMIT ?", (limit,)
+            ).fetchall()
+
     def fills_between(self, start: datetime, end: datetime) -> list[sqlite3.Row]:
         with self._connect() as c:
             return c.execute(
