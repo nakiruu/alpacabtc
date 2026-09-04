@@ -81,17 +81,24 @@ class Fill:
     is_maker: bool
 
     def realized_cost_bps(self, mid_at_submit: float) -> Cost:
-        """Reconstruct realized cost from a fill, in bps of notional at submission mid."""
+        """Reconstruct realized cost from a fill, in bps of notional at submission mid.
+
+        Note: we cannot split spread vs impact after the fact without the book at
+        fill time, so the combined figure lands in ``spread_bps`` and ``impact_bps``
+        is zero. Calibration compares totals only.
+        """
         notional_at_mid = self.qty * mid_at_submit
-        # signed price improvement/dis-improvement vs mid, in bps
         if self.side is Side.BUY:
             spread_and_impact_bps = (self.price - mid_at_submit) / mid_at_submit * 1e4
         else:
             spread_and_impact_bps = (mid_at_submit - self.price) / mid_at_submit * 1e4
-        # fee in bps of notional-at-mid; per-asset conversion handled by caller if needed
-        # (for same-quote pairs like BTC/USD, fee_amount / notional_at_mid works directly
-        # when fee_asset happens to be the quote currency — otherwise caller converts)
-        fee_bps = self.fee_amount / notional_at_mid * 1e4 if notional_at_mid > 0 else 0.0
-        # We can't separate spread from impact without the book at fill time;
-        # calibration lumps them and compares to modeled(spread + impact).
+
+        # Convert fee to quote units. On BTC/USD, a buy is charged in BTC (the received
+        # asset); a sell is charged in USD. Dividing raw fee_amount by USD notional
+        # would be dimensionally wrong when fee_asset is the base — off by a factor
+        # of price.
+        base_asset = self.symbol.split("/")[0]
+        fee_in_quote = self.fee_amount * self.price if self.fee_asset == base_asset else self.fee_amount
+        fee_bps = fee_in_quote / notional_at_mid * 1e4 if notional_at_mid > 0 else 0.0
+
         return Cost(fee_bps=fee_bps, spread_bps=spread_and_impact_bps, impact_bps=0.0)

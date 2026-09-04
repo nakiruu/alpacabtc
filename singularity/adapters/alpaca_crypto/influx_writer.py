@@ -85,7 +85,14 @@ class InfluxWriter:
             )
         except Exception:
             log.exception("influx_write_failed", batch_size=len(batch))
-            # drop batch on repeated failure rather than unbounded growth
+            # Restore batch at the head so we retry on next flush. Cap buffer at
+            # max_batch * 3 to bound growth when Influx is durably down.
+            cap = self._max_batch * 3
+            combined = batch + self._buffer
+            if len(combined) > cap:
+                log.warning("influx_buffer_overflow_drop", dropped=len(combined) - cap)
+                combined = combined[-cap:]
+            self._buffer = combined
 
     # ---- convenience builders (line protocol) ----
 

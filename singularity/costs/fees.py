@@ -1,12 +1,16 @@
 """Alpaca crypto fee schedule.
 
-Tiers below reflect the published schedule as of 2026Q3. If Alpaca changes their
-tiers, update ``TIERS`` — every downstream cost estimate reads from here.
-
 Convention: bps of notional. 15.0 means 0.15 % = 15 bps.
 
 Plan anti-pattern (§12): "Trading to reach a fee tier (costs $250/mo to save 3 bps)."
 Do not size or route trades to chase tiers. This module is a lookup, not a policy.
+
+Only Tier 0 is verified against Alpaca's current published crypto fee schedule.
+Alpaca publishes higher volume bands (100k / 1M / 10M / 25M / 100M USD 30d) with
+better maker/taker rates, but the bps values move often and encoding them from
+memory produced a stale table on the first pass of this file. When Phase 2 CFEE
+reconciliation confirms a tier crossing, append the verified row here rather
+than pre-populating from a guess.
 """
 
 from __future__ import annotations
@@ -24,12 +28,7 @@ class FeeTier:
 
 # Ordered highest-volume → lowest so first match wins on downward scan.
 TIERS: tuple[FeeTier, ...] = (
-    FeeTier("tier5", 100_000_000, 2.0, 10.0),
-    FeeTier("tier4",  25_000_000, 4.0, 12.0),
-    FeeTier("tier3",  10_000_000, 6.0, 15.0),
-    FeeTier("tier2",   1_000_000, 8.0, 18.0),
-    FeeTier("tier1",     100_000, 12.0, 22.0),
-    FeeTier("tier0",           0, 15.0, 25.0),
+    FeeTier("tier0", 0, 15.0, 25.0),
 )
 
 

@@ -19,8 +19,10 @@ below — see the TODO block.
 
 from __future__ import annotations
 
+import itertools
+import statistics
 from collections import deque
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 
 from .orderbook import OrderBook
@@ -43,11 +45,7 @@ class _OFIState:
     """Running order-flow-imbalance accumulator over a rolling window."""
 
     window: timedelta
-    events: deque = None  # deque of (ts, delta_bid_size, delta_ask_size)
-
-    def __post_init__(self) -> None:
-        if self.events is None:
-            self.events = deque()
+    events: deque = field(default_factory=deque)  # (ts, dbid, dask)
 
     def push(self, ts: datetime, dbid: float, dask: float) -> None:
         self.events.append((ts, dbid, dask))
@@ -58,6 +56,32 @@ class _OFIState:
     def value(self) -> float:
         # signed order-flow imbalance: positive → buy pressure
         return sum(dbid - dask for _, dbid, dask in self.events)
+
+
+def _ofi_side_delta(
+    *, new_px: float, new_sz: float, prev_px: float | None, prev_sz: float | None, is_bid: bool
+) -> float:
+    """Cont-Kukanov-Stoikov OFI contribution for one side of the touch.
+
+    For bids, an improved (higher) best price = fresh buy liquidity → +new_sz.
+    A worsened (lower) best price = old bid was consumed/pulled → -prev_sz.
+    Same-price change = arrivals/cancels at the level → new_sz - prev_sz.
+    Ask side is mirrored (improvement = lower price).
+    """
+    if prev_px is None or prev_sz is None:
+        return 0.0
+    if is_bid:
+        if new_px > prev_px:
+            return float(new_sz)
+        if new_px < prev_px:
+            return -float(prev_sz)
+        return float(new_sz - prev_sz)
+    # ask side
+    if new_px < prev_px:
+        return float(new_sz)
+    if new_px > prev_px:
+        return -float(prev_sz)
+    return float(new_sz - prev_sz)
 
 
 class BookFeatureEngine:
@@ -71,18 +95,30 @@ class BookFeatureEngine:
     def __init__(self, symbol: str, ofi_window_s: float = 60.0) -> None:
         self.symbol = symbol
         self._ofi = _OFIState(window=timedelta(seconds=ofi_window_s))
-        self._prev_best_bid_size: float | None = None
-        self._prev_best_ask_size: float | None = None
+        self._prev_bid_px: float | None = None
+        self._prev_bid_sz: float | None = None
+        self._prev_ask_px: float | None = None
+        self._prev_ask_sz: float | None = None
 
     def update(self, book: OrderBook, now: datetime) -> None:
         bid, ask = book.top()
         if bid is None or ask is None:
             return
-        dbid = 0.0 if self._prev_best_bid_size is None else bid[1] - self._prev_best_bid_size
-        dask = 0.0 if self._prev_best_ask_size is None else ask[1] - self._prev_best_ask_size
+        bid_px, bid_sz = bid
+        ask_px, ask_sz = ask
+        dbid = _ofi_side_delta(
+            new_px=bid_px, new_sz=bid_sz,
+            prev_px=self._prev_bid_px, prev_sz=self._prev_bid_sz,
+            is_bid=True,
+        )
+        dask = _ofi_side_delta(
+            new_px=ask_px, new_sz=ask_sz,
+            prev_px=self._prev_ask_px, prev_sz=self._prev_ask_sz,
+            is_bid=False,
+        )
         self._ofi.push(now, dbid, dask)
-        self._prev_best_bid_size = bid[1]
-        self._prev_best_ask_size = ask[1]
+        self._prev_bid_px, self._prev_bid_sz = bid_px, bid_sz
+        self._prev_ask_px, self._prev_ask_sz = ask_px, ask_sz
 
     def snapshot(self, book: OrderBook, now: datetime) -> BookFeatures | None:
         if not book.initialized:
@@ -171,22 +207,9 @@ def _ask_depth_slope(asks: list[tuple[float, float]], mid: float) -> float:
     """OLS slope of cumulative ask size on price offset in bps."""
     if len(asks) < 2 or mid <= 0.0:
         return 0.0
-    xs: list[float] = []
-    ys: list[float] = []
-    cum = 0.0
-    for px, sz in asks:
-        cum += sz
-        xs.append((px - mid) / mid * 1e4)
-        ys.append(cum)
-    n = len(xs)
-    mx = sum(xs) / n
-    my = sum(ys) / n
-    num = 0.0
-    den = 0.0
-    for i in range(n):
-        dx = xs[i] - mx
-        num += dx * (ys[i] - my)
-        den += dx * dx
-    if den < 1e-12:
-        return 0.0
-    return num / den
+    xs = [(px - mid) / mid * 1e4 for px, _ in asks]
+    ys = list(itertools.accumulate(sz for _, sz in asks))
+    try:
+        return statistics.linear_regression(xs, ys).slope
+    except statistics.StatisticsError:
+        return 0.0  # degenerate x-range

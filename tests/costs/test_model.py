@@ -20,22 +20,22 @@ from singularity.costs.model import (
     one_way_cost,
     round_trip_cost,
 )
-from singularity.costs.types import Cost, Side
+from singularity.costs.types import Cost, Fill, Side
+from datetime import datetime, timezone
 
 
 # ---------- Fees ----------
 
-def test_fee_tiers_boundary():
-    # Just below and just above tier1 threshold
-    assert fees.lookup(99_999).name == "tier0"
-    assert fees.lookup(100_000).name == "tier1"
+def test_fee_tier_lookup():
+    # Only tier0 is verified; all volumes map to tier0 until Phase 2 confirms.
     assert fees.lookup(0).name == "tier0"
+    assert fees.lookup(1_000_000_000).name == "tier0"
 
 
 def test_fee_bps_maker_vs_taker():
     assert fees.fee_bps(is_maker=True, volume_30d_usd=0) == 15.0
     assert fees.fee_bps(is_maker=False, volume_30d_usd=0) == 25.0
-    assert fees.fee_bps(is_maker=True, volume_30d_usd=100_000_001) == 2.0
+    assert fees.fee_bps(is_maker=True, volume_30d_usd=100_000_001) == 15.0
 
 
 # ---------- VWAP walk ----------
@@ -211,3 +211,42 @@ def test_adverse_selection_reference_value():
         side=Side.BUY, offset_bps=0.0, wait_seconds=60.0, realized_vol_bps_per_sqrt_s=1.0
     )
     assert c == pytest.approx(ADVERSE_K * math.sqrt(60), rel=1e-6)
+
+
+# ---------- Fill.realized_cost_bps — fee currency conversion ----------
+
+def _fill(*, side: Side, price: float, fee_amount: float, fee_asset: str, qty: float = 1.0):
+    return Fill(
+        order_id="x",
+        symbol="BTC/USD",
+        side=side,
+        qty=qty,
+        price=price,
+        filled_at=datetime.now(timezone.utc),
+        fee_asset=fee_asset,
+        fee_amount=fee_amount,
+        is_maker=False,
+    )
+
+
+def test_realized_fee_bps_when_fee_in_base_asset():
+    # BUY 1 BTC @ 50_000; fee = 0.0015 BTC (15 bps of received asset)
+    # Expected fee in USD = 0.0015 * 50_000 = 75; notional = 50_000 → 15 bps.
+    fill = _fill(side=Side.BUY, price=50_000.0, fee_amount=0.0015, fee_asset="BTC")
+    cost = fill.realized_cost_bps(mid_at_submit=50_000.0)
+    assert cost.fee_bps == pytest.approx(15.0, rel=1e-6)
+
+
+def test_realized_fee_bps_when_fee_in_quote_asset():
+    # SELL 1 BTC @ 50_000; fee = 75 USD (already in quote)
+    fill = _fill(side=Side.SELL, price=50_000.0, fee_amount=75.0, fee_asset="USD")
+    cost = fill.realized_cost_bps(mid_at_submit=50_000.0)
+    assert cost.fee_bps == pytest.approx(15.0, rel=1e-6)
+
+
+def test_realized_spread_bps_sign_by_side():
+    # BUY above mid → positive cost; SELL below mid → also positive cost
+    buy = _fill(side=Side.BUY, price=50_100.0, fee_amount=0.0, fee_asset="USD")
+    sell = _fill(side=Side.SELL, price=49_900.0, fee_amount=0.0, fee_asset="USD")
+    assert buy.realized_cost_bps(50_000).spread_bps > 0
+    assert sell.realized_cost_bps(50_000).spread_bps > 0

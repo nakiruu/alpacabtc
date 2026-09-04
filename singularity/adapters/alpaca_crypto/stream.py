@@ -15,6 +15,7 @@ Run:
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import signal
 from datetime import datetime, timezone
 
@@ -66,7 +67,7 @@ class StreamCapture:
                     break
         finally:
             feature_task.cancel()
-            with contextlib_suppress():
+            with contextlib.suppress(Exception, asyncio.CancelledError):
                 await feature_task
             await self.writer.stop()
 
@@ -128,16 +129,24 @@ class StreamCapture:
 
     async def _dispatch(self, m: dict) -> None:
         t = m.get("T")
-        if t == "t":
-            await self._on_trade(m)
-        elif t == "q":
-            await self._on_quote(m)
-        elif t == "o":
-            await self._on_book(m)
-        elif t in ("success", "subscription"):
-            log.info("ws_control", **m)
-        elif t == "error":
-            log.error("ws_error", **m)
+        try:
+            if t == "t":
+                await self._on_trade(m)
+            elif t == "q":
+                await self._on_quote(m)
+            elif t == "o":
+                await self._on_book(m)
+            elif t in ("success", "subscription"):
+                log.info("ws_control", **m)
+            elif t == "error":
+                log.error("ws_error", **m)
+            else:
+                # Unknown message type — logged so a silent Alpaca protocol change
+                # (new "T" values) surfaces instead of being dropped invisibly.
+                log.warning("ws_unknown_type", T=t)
+        except (KeyError, ValueError, TypeError) as e:
+            # A single malformed message must not kill the WS loop.
+            log.warning("dispatch_error", T=t, error=str(e), msg=str(m)[:200])
 
     async def _on_trade(self, m: dict) -> None:
         ts = _parse_ts(m["t"])
@@ -216,18 +225,6 @@ def _install_signal_handlers(capture: StreamCapture) -> None:
         except NotImplementedError:
             # Windows: signal handlers via add_signal_handler unsupported
             signal.signal(sig, lambda *_: capture.request_stop())
-
-
-class contextlib_suppress:
-    """Suppress Exception and CancelledError from the wrapped block."""
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, exc_type, exc, tb):
-        if exc_type is None:
-            return False
-        return issubclass(exc_type, (Exception, asyncio.CancelledError))
 
 
 async def _amain() -> None:

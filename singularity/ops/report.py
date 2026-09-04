@@ -74,8 +74,7 @@ def query_throughput(client: InfluxDBClient, bucket: str, org: str, window: str)
         for rec in tbl.records:
             sym = rec.values.get("symbol", "?")
             meas = rec.get_measurement()
-            counts.setdefault(sym, {}).setdefault(meas, 0)
-            counts[sym][meas] = int(rec.get_value())
+            counts.setdefault(sym, {})[meas] = int(rec.get_value())
     return [
         SymbolThroughput(
             symbol=sym,
@@ -94,16 +93,12 @@ def query_gaps(client: InfluxDBClient, bucket: str, org: str, window: str) -> Ga
       |> filter(fn: (r) => r._measurement == "stream_gap" and r._field == "gap_s")
     """
     tables = client.query_api().query(flux, org=org)
-    total = 0.0
-    n = 0
-    worst = 0.0
-    for tbl in tables:
-        for rec in tbl.records:
-            v = float(rec.get_value())
-            total += v
-            worst = max(worst, v)
-            n += 1
-    return GapStats(total_gap_s=total, n_events=n, worst_gap_s=worst)
+    vals = [float(rec.get_value()) for tbl in tables for rec in tbl.records]
+    return GapStats(
+        total_gap_s=sum(vals),
+        n_events=len(vals),
+        worst_gap_s=max(vals, default=0.0),
+    )
 
 
 def query_last_seen(client: InfluxDBClient, bucket: str, org: str) -> dict[str, datetime]:
@@ -183,9 +178,11 @@ def report(window: str = "24h") -> int:
             failing += 1
         else:
             age = (now - ts).total_seconds()
-            marker = "  [FAIL]" if age > STALENESS_ALERT_S else ""
             if age > STALENESS_ALERT_S:
                 failing += 1
+                marker = "  [FAIL]"
+            else:
+                marker = ""
         print(f"  {sym:<12} {age:>10.1f}s{marker}")
 
     # --- Gap gate ---

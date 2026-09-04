@@ -33,17 +33,26 @@ class OrderBook:
         """Apply an Alpaca orderbook message. Returns True if state now valid."""
         is_snapshot = bool(msg.get("r", False))
         if is_snapshot:
-            self.bids.clear()
-            self.asks.clear()
+            # Build the new book locally and swap in only after successful parse.
+            # A mid-parse failure otherwise leaves us with initialized=True over
+            # a half-cleared book, which then applies deltas onto garbage.
+            new_bids: SortedDict = SortedDict()
+            new_asks: SortedDict = SortedDict()
+            for lvl in msg.get("b", []):
+                _upsert(new_bids, float(lvl["p"]), float(lvl["s"]))
+            for lvl in msg.get("a", []):
+                _upsert(new_asks, float(lvl["p"]), float(lvl["s"]))
+            self.bids = new_bids
+            self.asks = new_asks
             self.initialized = True
-        elif not self.initialized:
-            # Delta before snapshot — cannot trust state, drop
-            return False
-
-        for lvl in msg.get("b", []):
-            _upsert(self.bids, float(lvl["p"]), float(lvl["s"]))
-        for lvl in msg.get("a", []):
-            _upsert(self.asks, float(lvl["p"]), float(lvl["s"]))
+        else:
+            if not self.initialized:
+                # Delta before snapshot — cannot trust state, drop
+                return False
+            for lvl in msg.get("b", []):
+                _upsert(self.bids, float(lvl["p"]), float(lvl["s"]))
+            for lvl in msg.get("a", []):
+                _upsert(self.asks, float(lvl["p"]), float(lvl["s"]))
 
         ts = msg.get("t")
         if ts:
@@ -68,19 +77,10 @@ class OrderBook:
         return (px, self.asks[px])
 
     def bids_desc(self, depth: int) -> list[Level]:
-        keys = self.bids.keys()
-        n = min(depth, len(keys))
-        # slice highest-first: last n keys reversed
-        out: list[Level] = []
-        for i in range(n):
-            px = keys[-1 - i]
-            out.append((px, self.bids[px]))
-        return out
+        return [(px, self.bids[px]) for px in reversed(self.bids.keys()[-depth:])]
 
     def asks_asc(self, depth: int) -> list[Level]:
-        keys = self.asks.keys()
-        n = min(depth, len(keys))
-        return [(keys[i], self.asks[keys[i]]) for i in range(n)]
+        return [(px, self.asks[px]) for px in self.asks.keys()[:depth]]
 
     def staleness_s(self, now: datetime) -> float | None:
         if self.last_update is None:
