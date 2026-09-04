@@ -35,8 +35,18 @@ class FakeRest:
         self.closed_positions.append(symbol)
         return {"symbol": symbol, "status": "closed"}
 
+    submit_status_code: int = 200  # set to 4xx to simulate rejection
+
     async def submit_order(self, **kwargs) -> dict[str, Any]:
         self.submitted.append(kwargs)
+        if self.submit_status_code >= 400:
+            import httpx
+            req = httpx.Request("POST", "https://paper-api.alpaca.markets/v2/orders")
+            resp = httpx.Response(
+                self.submit_status_code, request=req,
+                content=b'{"code":40310000,"message":"cost basis must be >= minimal amount of order 10"}',
+            )
+            raise httpx.HTTPStatusError("simulated", request=req, response=resp)
         return {"id": self.submit_response_id, "status": "new", **kwargs}
 
     async def get_activities(self, activity_types="FILL,CFEE", after=None, until=None, page_size=100):

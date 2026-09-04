@@ -28,6 +28,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
 
+import httpx
+
 from ..adapters.alpaca_crypto.market_data import MarketDataClient
 from ..adapters.alpaca_crypto.orders import OrderAdapter
 from ..costs.model import BookSnapshot, one_way_cost
@@ -62,6 +64,8 @@ class PassiveResult:
     avg_price: float = 0.0
     final_phase: LadderPhase | None = None
     timed_out: bool = False
+    rejected: bool = False           # 4xx from Alpaca — order never became live
+    rejection_reason: str | None = None
 
     @property
     def is_filled(self) -> bool:
@@ -93,82 +97,96 @@ class PassiveEntry:
         result = PassiveResult()
         remaining = qty
 
-        # ----- Phase A: rest at own touch, wait T1 -----
-        touch_intent = await self._submit_leg(
-            side=side, symbol=symbol, qty=remaining, phase=LadderPhase.TOUCH,
-            price_selector=lambda book: book.best_bid if side is Side.BUY else book.best_ask,
-            tif=TimeInForce.GTC, is_maker=True,
-        )
-        if touch_intent is not None:
-            result.intents.append(touch_intent)
-            phase_fills = await self._collect_fills(touch_intent.id, remaining, self._cfg.t1_s)
-            self._accumulate(result, phase_fills)
-            remaining = qty - result.filled_qty
-        if remaining <= 1e-9:
-            result.final_phase = LadderPhase.TOUCH
-            log.info("passive_done_at_touch", filled_qty=result.filled_qty)
+        try:
+            # ----- Phase A: rest at own touch, wait T1 -----
+            touch_intent = await self._submit_leg(
+                side=side, symbol=symbol, qty=remaining, phase=LadderPhase.TOUCH,
+                price_selector=lambda book: book.best_bid if side is Side.BUY else book.best_ask,
+                tif=TimeInForce.GTC, is_maker=True,
+            )
+            if touch_intent is not None:
+                result.intents.append(touch_intent)
+                phase_fills = await self._collect_fills(touch_intent.id, remaining, self._cfg.t1_s)
+                self._accumulate(result, phase_fills)
+                remaining = qty - result.filled_qty
+            if remaining <= 1e-9:
+                result.final_phase = LadderPhase.TOUCH
+                log.info("passive_done_at_touch", filled_qty=result.filled_qty)
+                return result
+
+            # ----- Phase B: cancel remainder, resubmit at new touch, wait T2-T1 -----
+            if touch_intent is not None:
+                await self._cancel_quietly(touch_intent.id)
+            touch2_intent = await self._submit_leg(
+                side=side, symbol=symbol, qty=remaining, phase=LadderPhase.TOUCH_2,
+                price_selector=lambda book: book.best_bid if side is Side.BUY else book.best_ask,
+                tif=TimeInForce.GTC, is_maker=True,
+            )
+            if touch2_intent is not None:
+                result.intents.append(touch2_intent)
+                wait_s = max(0.0, self._cfg.t2_s - self._cfg.t1_s)
+                phase_fills = await self._collect_fills(touch2_intent.id, remaining, wait_s)
+                self._accumulate(result, phase_fills)
+                remaining = qty - result.filled_qty
+            if remaining <= 1e-9:
+                result.final_phase = LadderPhase.TOUCH_2
+                log.info("passive_done_at_touch_2", filled_qty=result.filled_qty)
+                return result
+
+            # ----- Phase C: cancel, resubmit at mid, wait T3-T2 -----
+            if touch2_intent is not None:
+                await self._cancel_quietly(touch2_intent.id)
+            mid_intent = await self._submit_leg(
+                side=side, symbol=symbol, qty=remaining, phase=LadderPhase.MID,
+                price_selector=lambda book: book.mid,
+                tif=TimeInForce.GTC, is_maker=True,  # resting at mid still counts as maker if it fills there
+            )
+            if mid_intent is not None:
+                result.intents.append(mid_intent)
+                wait_s = max(0.0, self._cfg.t3_s - self._cfg.t2_s)
+                phase_fills = await self._collect_fills(mid_intent.id, remaining, wait_s)
+                self._accumulate(result, phase_fills)
+                remaining = qty - result.filled_qty
+            if remaining <= 1e-9:
+                result.final_phase = LadderPhase.MID
+                log.info("passive_done_at_mid", filled_qty=result.filled_qty)
+                return result
+
+            # ----- Phase D: cross with IOC at far touch -----
+            if mid_intent is not None:
+                await self._cancel_quietly(mid_intent.id)
+            ioc_intent = await self._submit_leg(
+                side=side, symbol=symbol, qty=remaining, phase=LadderPhase.CROSS_IOC,
+                price_selector=lambda book: book.best_ask if side is Side.BUY else book.best_bid,
+                tif=TimeInForce.IOC, is_maker=False,
+            )
+            if ioc_intent is not None:
+                result.intents.append(ioc_intent)
+                phase_fills = await self._collect_fills(ioc_intent.id, remaining, self._cfg.ioc_wait_s)
+                self._accumulate(result, phase_fills)
+
+            result.final_phase = LadderPhase.CROSS_IOC
+            result.timed_out = result.filled_qty < qty - 1e-9
+            log.info(
+                "passive_done_cross_ioc",
+                filled_qty=result.filled_qty,
+                requested_qty=qty,
+                timed_out=result.timed_out,
+            )
             return result
-
-        # ----- Phase B: cancel remainder, resubmit at new touch, wait T2-T1 -----
-        if touch_intent is not None:
-            await self._cancel_quietly(touch_intent.id)
-        touch2_intent = await self._submit_leg(
-            side=side, symbol=symbol, qty=remaining, phase=LadderPhase.TOUCH_2,
-            price_selector=lambda book: book.best_bid if side is Side.BUY else book.best_ask,
-            tif=TimeInForce.GTC, is_maker=True,
-        )
-        if touch2_intent is not None:
-            result.intents.append(touch2_intent)
-            wait_s = max(0.0, self._cfg.t2_s - self._cfg.t1_s)
-            phase_fills = await self._collect_fills(touch2_intent.id, remaining, wait_s)
-            self._accumulate(result, phase_fills)
-            remaining = qty - result.filled_qty
-        if remaining <= 1e-9:
-            result.final_phase = LadderPhase.TOUCH_2
-            log.info("passive_done_at_touch_2", filled_qty=result.filled_qty)
+        except httpx.HTTPStatusError as e:
+            # 4xx = the order was rejected outright (bad qty, insufficient balance,
+            # symbol restriction, etc). Escalating through the ladder gains nothing.
+            body = e.response.text[:200]
+            result.rejected = True
+            result.rejection_reason = f"HTTP {e.response.status_code}: {body}"
+            log.error(
+                "passive_aborted_on_rejection",
+                status=e.response.status_code,
+                body=body,
+                phase=result.final_phase.value if result.final_phase else "startup",
+            )
             return result
-
-        # ----- Phase C: cancel, resubmit at mid, wait T3-T2 -----
-        if touch2_intent is not None:
-            await self._cancel_quietly(touch2_intent.id)
-        mid_intent = await self._submit_leg(
-            side=side, symbol=symbol, qty=remaining, phase=LadderPhase.MID,
-            price_selector=lambda book: book.mid,
-            tif=TimeInForce.GTC, is_maker=True,  # resting at mid still counts as maker if it fills there
-        )
-        if mid_intent is not None:
-            result.intents.append(mid_intent)
-            wait_s = max(0.0, self._cfg.t3_s - self._cfg.t2_s)
-            phase_fills = await self._collect_fills(mid_intent.id, remaining, wait_s)
-            self._accumulate(result, phase_fills)
-            remaining = qty - result.filled_qty
-        if remaining <= 1e-9:
-            result.final_phase = LadderPhase.MID
-            log.info("passive_done_at_mid", filled_qty=result.filled_qty)
-            return result
-
-        # ----- Phase D: cross with IOC at far touch -----
-        if mid_intent is not None:
-            await self._cancel_quietly(mid_intent.id)
-        ioc_intent = await self._submit_leg(
-            side=side, symbol=symbol, qty=remaining, phase=LadderPhase.CROSS_IOC,
-            price_selector=lambda book: book.best_ask if side is Side.BUY else book.best_bid,
-            tif=TimeInForce.IOC, is_maker=False,
-        )
-        if ioc_intent is not None:
-            result.intents.append(ioc_intent)
-            phase_fills = await self._collect_fills(ioc_intent.id, remaining, self._cfg.ioc_wait_s)
-            self._accumulate(result, phase_fills)
-
-        result.final_phase = LadderPhase.CROSS_IOC
-        result.timed_out = result.filled_qty < qty - 1e-9
-        log.info(
-            "passive_done_cross_ioc",
-            filled_qty=result.filled_qty,
-            requested_qty=qty,
-            timed_out=result.timed_out,
-        )
-        return result
 
     async def _submit_leg(
         self,
@@ -202,6 +220,15 @@ class PassiveEntry:
         )
         try:
             await self._adapter.submit(intent)
+        except httpx.HTTPStatusError as e:
+            # 4xx = validation/auth/permission rejection. Escalating gains nothing —
+            # let execute() see it and abort the whole ladder.
+            if 400 <= e.response.status_code < 500:
+                raise
+            log.exception("passive_submit_transient_error",
+                          intent_id=intent.id, phase=phase.value,
+                          status=e.response.status_code)
+            return None
         except Exception:
             log.exception("passive_submit_failed", intent_id=intent.id, phase=phase.value)
             return None

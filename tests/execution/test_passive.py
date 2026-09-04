@@ -103,6 +103,23 @@ async def test_partial_fill_at_touch_carries_remainder_forward(store, cfg):
 
 
 @pytest.mark.asyncio
+async def test_4xx_rejection_aborts_ladder_immediately(store, cfg):
+    """A validation-error rejection should stop the ladder; escalating won't help."""
+    rest = FakeRest(submit_status_code=403)  # simulates Alpaca min-notional rejection
+    adapter = OrderAdapter(rest, store)
+    market = FakeMarket()
+    ladder = PassiveEntry(adapter, market, store, config=cfg)
+
+    result = await ladder.execute(side=Side.BUY, symbol="BTC/USD", qty=0.0001)
+
+    assert result.rejected is True
+    assert result.rejection_reason is not None and "403" in result.rejection_reason
+    # Only ONE submit attempt — no ladder escalation
+    assert len(rest.submitted) == 1
+    assert result.filled_qty == 0.0
+
+
+@pytest.mark.asyncio
 async def test_prices_derived_from_book(store, cfg):
     rest = FakeRest()
     adapter = OrderAdapter(rest, store)

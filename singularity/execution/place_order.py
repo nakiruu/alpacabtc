@@ -35,6 +35,9 @@ from .passive import LadderConfig, PassiveEntry
 
 log = get_logger(__name__)
 
+# Alpaca crypto minimum notional (USD-equivalent). Rejection code 40310000.
+ALPACA_CRYPTO_MIN_NOTIONAL = 10.0
+
 
 async def _run(args) -> int:
     from ..config import get_settings
@@ -62,6 +65,21 @@ async def _run(args) -> int:
         api_key=settings.alpaca_api_key,
         secret_key=settings.alpaca_secret_key,
     ) as market:
+        # Pre-flight: reject before touching REST if the order can't clear Alpaca's minimum.
+        q = await market.latest_quote(args.symbol)
+        if q is None:
+            print(f"[fatal] no quote available for {args.symbol}")
+            return 2
+        estimated = args.qty * q["ask_px"]
+        if estimated < ALPACA_CRYPTO_MIN_NOTIONAL:
+            suggested = ALPACA_CRYPTO_MIN_NOTIONAL * 1.1 / q["ask_px"]
+            print(
+                f"[fatal] estimated notional ${estimated:.2f} < Alpaca minimum "
+                f"${ALPACA_CRYPTO_MIN_NOTIONAL:.2f} for crypto orders.\n"
+                f"        try --qty {suggested:.6f} or higher (~${suggested * q['ask_px']:.2f})"
+            )
+            return 2
+
         adapter = OrderAdapter(rest, store)
         ladder = PassiveEntry(
             adapter=adapter, market=market, store=store,
@@ -75,6 +93,9 @@ async def _run(args) -> int:
             side=Side(args.side), symbol=args.symbol, qty=args.qty
         )
 
+    if result.rejected:
+        print(f"\npassive result: REJECTED — {result.rejection_reason}")
+        return 2
     print(
         f"\npassive result: filled {result.filled_qty}/{args.qty} @ {result.avg_price:.2f} "
         f"(final phase: {result.final_phase.value if result.final_phase else 'n/a'}, "
