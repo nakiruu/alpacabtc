@@ -23,9 +23,13 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-from ..adapters.alpaca_crypto.history import HistoryClient, load_bars_cached
+from ..adapters.alpaca_crypto.history import HistoryClient
+from ..adapters.alpaca_crypto.history import load_bars_cached as load_alpaca_cached
+from ..adapters.binance.history import BinanceHistoryClient
+from ..adapters.binance.history import load_bars_cached as load_binance_cached
 from ..logs import get_logger
 from ..signals.tsmom import tsmom as _make_tsmom
+from ..signals.tsmom import tsmom_voltarget as _make_tsmom_voltarget
 from .backtest import (
     BacktestResult,
     buy_and_hold,
@@ -46,8 +50,9 @@ STRATEGIES = {
     "buy_and_hold": buy_and_hold,
     "flat": flat,
     "random": random_binary,
-    # tsmom is a factory (needs config); resolved in _run based on CLI flags.
+    # factories (need config); resolved in _run based on CLI flags.
     "tsmom": None,
+    "tsmom_voltarget": None,
 }
 
 
@@ -106,14 +111,20 @@ async def _run(args) -> int:
     settings = get_settings()
     configure_logging(settings.log_level)
 
-    if args.strategy == "tsmom":
+    if args.strategy in ("tsmom", "tsmom_voltarget"):
         lookbacks = tuple(int(x) for x in args.tsmom_lookbacks.split(","))
-        strategy = _make_tsmom(
-            lookbacks=lookbacks, enter=args.tsmom_enter, exit_=args.tsmom_exit,
-        )
-        # Auto-set warmup to cover longest lookback if user didn't override
+        if args.strategy == "tsmom":
+            strategy = _make_tsmom(
+                lookbacks=lookbacks, enter=args.tsmom_enter, exit_=args.tsmom_exit,
+            )
+        else:
+            strategy = _make_tsmom_voltarget(
+                lookbacks=lookbacks, enter=args.tsmom_enter, exit_=args.tsmom_exit,
+                target_vol=args.target_vol, vol_lookback=args.vol_lookback,
+                rebalance_band=args.rebalance_band,
+            )
         if args.warmup_bars == 0:
-            args.warmup_bars = max(lookbacks) + 10
+            args.warmup_bars = max(lookbacks) + max(10, args.vol_lookback)
     else:
         strategy = STRATEGIES[args.strategy]
 
@@ -124,14 +135,21 @@ async def _run(args) -> int:
         return 2
     cache_dir = Path(args.cache_dir)
 
-    async with HistoryClient(
-        api_key=settings.alpaca_api_key, secret_key=settings.alpaca_secret_key
-    ) as hc:
-        bars = await load_bars_cached(
-            hc, args.symbol, start, end, cache_dir,
-            timeframe=args.timeframe, force_refresh=args.refresh,
-        )
-    log.info("bars_loaded", n=len(bars), symbol=args.symbol,
+    if args.data_source == "binance":
+        async with BinanceHistoryClient() as hc:
+            bars = await load_binance_cached(
+                hc, args.symbol, start, end, cache_dir,
+                timeframe=args.timeframe, force_refresh=args.refresh,
+            )
+    else:
+        async with HistoryClient(
+            api_key=settings.alpaca_api_key, secret_key=settings.alpaca_secret_key
+        ) as hc:
+            bars = await load_alpaca_cached(
+                hc, args.symbol, start, end, cache_dir,
+                timeframe=args.timeframe, force_refresh=args.refresh,
+            )
+    log.info("bars_loaded", n=len(bars), source=args.data_source, symbol=args.symbol,
              first=bars[0].ts.isoformat() if bars else None,
              last=bars[-1].ts.isoformat() if bars else None)
 
@@ -237,6 +255,8 @@ def main() -> None:
                              "none=cost-free (batch 3.1 behavior)")
     parser.add_argument("--spread-bps", type=float, default=3.0,
                         help="Stylized book spread in bps (default 3, matches live BTC/USD)")
+    parser.add_argument("--data-source", default="alpaca", choices=["alpaca", "binance"],
+                        help="alpaca (BTC/USD, 2022+) vs binance (BTC/USDT proxy, 2017+)")
     parser.add_argument("--cache-dir", default="./state/bars")
     parser.add_argument("--refresh", action="store_true", help="Ignore cache, re-fetch bars")
     parser.add_argument("--train-bars", type=int, default=360)
@@ -264,6 +284,12 @@ def main() -> None:
                         help="Hysteresis enter threshold (default 0.25)")
     parser.add_argument("--tsmom-exit", type=float, default=-0.10,
                         help="Hysteresis exit threshold (default -0.10)")
+    parser.add_argument("--target-vol", type=float, default=0.40,
+                        help="Vol-target overlay: annualized target (default 0.40 = 40%)")
+    parser.add_argument("--vol-lookback", type=int, default=30,
+                        help="Bars for realized-vol estimate (default 30)")
+    parser.add_argument("--rebalance-band", type=float, default=0.15,
+                        help="Vol-target: only rebalance when |Δ multiplier| > this (default 0.15)")
     args = parser.parse_args()
     sys.exit(asyncio.run(_run(args)))
 

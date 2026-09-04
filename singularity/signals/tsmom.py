@@ -119,3 +119,32 @@ def tsmom(
         raws = tsmom_signal(bars, lookbacks)
         return hysteresis_positions(raws, enter=enter, exit_=exit_)
     return strategy
+
+
+def tsmom_voltarget(
+    lookbacks: tuple[int, ...] = DEFAULT_LOOKBACKS,
+    enter: float = DEFAULT_ENTER,
+    exit_: float = DEFAULT_EXIT,
+    target_vol: float = 0.40,
+    vol_lookback: int = 30,
+    rebalance_band: float = 0.15,
+) -> Strategy:
+    """Composition: TSMOM signal (0/1) multiplied by the vol-target overlay.
+
+    Position at bar i = tsmom_signal_i × vol_multiplier_i. Produces fractional
+    positions in [0, 1]. When TSMOM says flat, position is 0 regardless of vol
+    (multiplication zeros it). When TSMOM says long, position sizing is scaled
+    to target vol.
+    """
+    from ..overlays.voltarget import vol_target_multipliers
+    tsmom_strat = tsmom(lookbacks, enter, exit_)
+
+    def strategy(bars: list[Bar]) -> list[float]:
+        tsmom_pos = tsmom_strat(bars)
+        mult = vol_target_multipliers(
+            bars, target_annualized=target_vol,
+            vol_lookback=vol_lookback, rebalance_band=rebalance_band,
+        )
+        return [t * m for t, m in zip(tsmom_pos, mult)]
+
+    return strategy

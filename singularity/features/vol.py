@@ -1,18 +1,39 @@
-"""Volatility features derived from the Phase 0 trade tape.
+"""Volatility features.
 
-For Phase 2 we only need `atr_from_influx` — the bracket supervisor uses it
-to size stop/target. Realized-vol variants, bipower variation, GARCH, and
-vol-of-vol are all Phase 4 additions.
+  * `atr_from_influx` — Wilder ATR-14 from Phase 0 trade tape (bracket supervisor)
+  * `realized_vol_annualized` — rolling stdev of daily returns × sqrt(365)
+    (Phase 4 vol-target overlay)
 """
 
 from __future__ import annotations
 
+import math
+import statistics
 from dataclasses import dataclass
 from datetime import datetime
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from influxdb_client import InfluxDBClient
+
+
+BARS_PER_YEAR_DAILY = 365   # crypto is 24/7
+
+
+def realized_vol_annualized(returns: list[float], lookback: int) -> list[float]:
+    """Rolling annualized realized vol at each bar via stdev × sqrt(365).
+
+    Length matches `returns`. First `lookback - 1` entries are 0.0 (no window yet).
+    """
+    if lookback < 2:
+        raise ValueError(f"lookback must be >= 2, got {lookback}")
+    out = [0.0] * len(returns)
+    factor = math.sqrt(BARS_PER_YEAR_DAILY)
+    for i in range(lookback - 1, len(returns)):
+        window = returns[i - lookback + 1:i + 1]
+        sd = statistics.stdev(window)
+        out[i] = sd * factor
+    return out
 
 
 @dataclass
