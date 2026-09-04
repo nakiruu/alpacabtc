@@ -37,6 +37,7 @@ services:
     restart: "no"
 
   capture:
+    build: .
     image: singularity-capture:latest
     container_name: singularity-capture
     depends_on:
@@ -52,6 +53,7 @@ services:
     restart: unless-stopped
 
   executor:
+    build: .
     image: singularity-capture:latest
     container_name: singularity-executor
     # Run as Unraid's nobody:users so bind-mounted state/logs are writable
@@ -74,6 +76,7 @@ services:
     restart: unless-stopped
 
   watchdog:
+    build: .
     image: singularity-capture:latest
     container_name: singularity-watchdog
     user: "99:100"
