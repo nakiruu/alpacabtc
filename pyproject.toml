@@ -35,6 +35,7 @@ watchdog = "singularity.execution.watchdog:main"
 activities-sync = "singularity.execution.activities:main"
 place-test-order = "singularity.execution.place_order:main"
 close-position = "singularity.execution.close_position:main"
+backtest = "singularity.harness.cli:main"
 
 [build-system]
 requires = ["hatchling"]
