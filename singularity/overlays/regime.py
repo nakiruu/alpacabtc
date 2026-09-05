@@ -115,3 +115,102 @@ def regime_gate_multipliers(
             else:
                 out[i] = risk_off_multiplier
     return out
+
+
+# ---------------------------------------------------------------------------
+# Batch 4.4: percentile-based regime gate.
+#
+# The ratio-based gate above fails BTC's persistently-high-vol distribution —
+# fold-12 diagnostics showed 89% peak vol during LUNA never triggered the
+# 1.5×-baseline threshold because rolling median was already ~70%. Retuning
+# the ratio (e.g. 1.3×) fires elsewhere unhelpfully and breaks the null-gate.
+#
+# Percentile version: build a rolling distribution of realized vol over a
+# LONG baseline window (default ~5 years daily), and fire risk-off when
+# current vol lands above the configured percentile of that distribution.
+# 80th percentile means "top 20% of observed vol → deleverage."
+#
+# Same sticky-exit rule as the ratio version.
+#
+# Adaptive baseline: uses `min(bars_seen, max_baseline_bars)` history rather
+# than requiring the full window, so early-history bars still get SOME
+# percentile calc after `min_baseline_bars` of data. This matters for
+# walk-forward with limited warmup.
+# ---------------------------------------------------------------------------
+
+
+def _rolling_percentile_threshold(
+    series: list[float], max_window: int, percentile: float, min_samples: int,
+) -> list[float]:
+    """For each index i, return the `percentile`-quantile of series[max(0, i-max_window+1)..i].
+
+    Skips zeros / non-positive vols (warmup or missing data). Returns 0.0 when
+    fewer than `min_samples` positive values are available (caller treats 0.0
+    as "no threshold yet").
+    """
+    out = [0.0] * len(series)
+    for i in range(len(series)):
+        window_start = max(0, i - max_window + 1)
+        window_slice = sorted(v for v in series[window_start:i + 1] if v > 0.0)
+        if len(window_slice) < min_samples:
+            continue
+        # percentile in [0, 1]; use nearest-lower interpolation (index-of)
+        idx = min(len(window_slice) - 1, int(percentile * (len(window_slice) - 1)))
+        out[i] = window_slice[idx]
+    return out
+
+
+def regime_gate_percentile_multipliers(
+    bars: list[Bar],
+    vol_lookback: int = 30,
+    baseline_lookback: int = 1825,     # ~5 years daily
+    vol_percentile: float = 0.80,       # top 20% of observed vol → risk-off
+    risk_off_multiplier: float = 0.5,
+    sticky_bars: int = 20,
+    min_baseline_samples: int = 90,     # need at least this many observations
+) -> list[float]:
+    """Percentile-based regime gate.
+
+    Triggers risk-off when current realized vol at bar i is >= the
+    `vol_percentile`-quantile of realized vol observed over the prior
+    `baseline_lookback` bars. Sticky exit: stay risk-off for at least
+    `sticky_bars` after entry.
+    """
+    n = len(bars)
+    if n < 2:
+        return [1.0] * n
+
+    closes = [b.close for b in bars]
+    daily_rets = [(closes[i] - closes[i - 1]) / closes[i - 1] for i in range(1, n)]
+    current_vol_series = realized_vol_annualized(daily_rets, vol_lookback)
+    # Align to bar indices (bar 0 has no vol estimate)
+    current_at_bar = [0.0] + current_vol_series
+
+    # Threshold at each bar = percentile of vol observed in trailing baseline
+    threshold_at_bar = _rolling_percentile_threshold(
+        current_at_bar, baseline_lookback, vol_percentile, min_baseline_samples,
+    )
+
+    out = [1.0] * n
+    risk_off_since: int | None = None
+    for i in range(n):
+        curr = current_at_bar[i]
+        thresh = threshold_at_bar[i]
+        if thresh <= 0.0 or curr <= 0.0:
+            out[i] = 1.0
+            continue
+
+        if risk_off_since is None:
+            if curr >= thresh:
+                risk_off_since = i
+                out[i] = risk_off_multiplier
+            else:
+                out[i] = 1.0
+        else:
+            bars_in_regime = i - risk_off_since
+            if bars_in_regime >= sticky_bars and curr < thresh:
+                risk_off_since = None
+                out[i] = 1.0
+            else:
+                out[i] = risk_off_multiplier
+    return out

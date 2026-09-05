@@ -38,6 +38,7 @@ from ..adapters.kraken.history import load_bars_cached as load_kraken_cached
 from ..logs import get_logger
 from ..signals.tsmom import tsmom as _make_tsmom
 from ..signals.tsmom import tsmom_full as _make_tsmom_full
+from ..signals.tsmom import tsmom_full_v2 as _make_tsmom_full_v2
 from ..signals.tsmom import tsmom_voltarget as _make_tsmom_voltarget
 from .diagnose import compute_fold_diagnostic, print_diagnostic
 from .backtest import (
@@ -64,6 +65,7 @@ STRATEGIES = {
     "tsmom": None,
     "tsmom_voltarget": None,
     "tsmom_full": None,
+    "tsmom_full_v2": None,
 }
 
 
@@ -122,7 +124,7 @@ async def _run(args) -> int:
     settings = get_settings()
     configure_logging(settings.log_level)
 
-    if args.strategy in ("tsmom", "tsmom_voltarget", "tsmom_full"):
+    if args.strategy in ("tsmom", "tsmom_voltarget", "tsmom_full", "tsmom_full_v2"):
         lookbacks = tuple(int(x) for x in args.tsmom_lookbacks.split(","))
         if args.strategy == "tsmom":
             strategy = _make_tsmom(
@@ -134,7 +136,7 @@ async def _run(args) -> int:
                 target_vol=args.target_vol, vol_lookback=args.vol_lookback,
                 rebalance_band=args.rebalance_band,
             )
-        else:  # tsmom_full
+        elif args.strategy == "tsmom_full":
             strategy = _make_tsmom_full(
                 lookbacks=lookbacks, enter=args.tsmom_enter, exit_=args.tsmom_exit,
                 target_vol=args.target_vol, vol_lookback=args.vol_lookback,
@@ -145,11 +147,28 @@ async def _run(args) -> int:
                 regime_risk_off_multiplier=args.regime_risk_off_multiplier,
                 regime_sticky_bars=args.regime_sticky_bars,
             )
+        else:  # tsmom_full_v2 (percentile regime)
+            strategy = _make_tsmom_full_v2(
+                lookbacks=lookbacks, enter=args.tsmom_enter, exit_=args.tsmom_exit,
+                target_vol=args.target_vol, vol_lookback=args.vol_lookback,
+                rebalance_band=args.rebalance_band,
+                regime_vol_lookback=args.regime_vol_lookback,
+                regime_baseline_lookback=args.regime_v2_baseline_lookback,
+                regime_percentile=args.regime_percentile,
+                regime_risk_off_multiplier=args.regime_risk_off_multiplier,
+                regime_sticky_bars=args.regime_sticky_bars,
+                regime_min_baseline_samples=args.regime_min_baseline_samples,
+            )
         if args.warmup_bars == 0:
+            # For v2 we want enough history to satisfy min_baseline_samples for the
+            # percentile threshold. Baseline can extend back to whatever's available.
+            baseline_need = (args.regime_v2_baseline_lookback
+                             if args.strategy == "tsmom_full_v2"
+                             else args.regime_baseline_lookback)
             args.warmup_bars = max(
                 max(lookbacks),
                 args.vol_lookback,
-                args.regime_baseline_lookback,
+                baseline_need,
             ) + 10
     else:
         strategy = STRATEGIES[args.strategy]
@@ -415,6 +434,13 @@ def main() -> None:
                         help="Regime gate: exposure during risk-off (default 0.5)")
     parser.add_argument("--regime-sticky-bars", type=int, default=20,
                         help="Regime gate: minimum bars to stay risk-off before allowing exit (default 20)")
+    # tsmom_full_v2 (percentile-based regime) knobs
+    parser.add_argument("--regime-v2-baseline-lookback", type=int, default=1825,
+                        help="v2 regime: bars for rolling percentile baseline (default 1825 = ~5y)")
+    parser.add_argument("--regime-percentile", type=float, default=0.80,
+                        help="v2 regime: fire risk-off when vol >= this quantile of baseline (default 0.80)")
+    parser.add_argument("--regime-min-baseline-samples", type=int, default=90,
+                        help="v2 regime: minimum vol observations before percentile is computed (default 90)")
     parser.add_argument("--diagnose-fold", default="",
                         help="Comma-separated fold indices to print per-bar diagnostics for (e.g. '12,21,29')")
     parser.add_argument("--diagnose-worst", type=int, default=0,

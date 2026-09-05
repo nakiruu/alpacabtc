@@ -191,3 +191,49 @@ def tsmom_full(
         return [t * v * r for t, v, r in zip(tsmom_pos, vol_mult, regime_mult)]
 
     return strategy
+
+
+def tsmom_full_v2(
+    lookbacks: tuple[int, ...] = DEFAULT_LOOKBACKS,
+    enter: float = DEFAULT_ENTER,
+    exit_: float = DEFAULT_EXIT,
+    target_vol: float = 0.40,
+    vol_lookback: int = 30,
+    rebalance_band: float = 0.15,
+    regime_vol_lookback: int = 30,
+    regime_baseline_lookback: int = 1825,   # ~5 years daily
+    regime_percentile: float = 0.80,          # top 20% of vol → risk-off
+    regime_risk_off_multiplier: float = 0.5,
+    regime_sticky_bars: int = 20,
+    regime_min_baseline_samples: int = 90,
+) -> Strategy:
+    """Full composition with the PERCENTILE-based regime gate (batch 4.4).
+
+    Same as tsmom_full but regime gate uses a rolling-percentile threshold
+    instead of a ratio-to-median. Better calibrated for BTC's persistently-
+    high vol distribution — the ratio version failed to fire during known
+    high-vol episodes (LUNA, Nov 2021 top) because baseline was already
+    elevated. Percentile fires when vol lands in top 20% of observed history.
+    """
+    from ..overlays.regime import regime_gate_percentile_multipliers
+    from ..overlays.voltarget import vol_target_multipliers
+    tsmom_strat = tsmom(lookbacks, enter, exit_)
+
+    def strategy(bars: list[Bar]) -> list[float]:
+        tsmom_pos = tsmom_strat(bars)
+        vol_mult = vol_target_multipliers(
+            bars, target_annualized=target_vol,
+            vol_lookback=vol_lookback, rebalance_band=rebalance_band,
+        )
+        regime_mult = regime_gate_percentile_multipliers(
+            bars,
+            vol_lookback=regime_vol_lookback,
+            baseline_lookback=regime_baseline_lookback,
+            vol_percentile=regime_percentile,
+            risk_off_multiplier=regime_risk_off_multiplier,
+            sticky_bars=regime_sticky_bars,
+            min_baseline_samples=regime_min_baseline_samples,
+        )
+        return [t * v * r for t, v, r in zip(tsmom_pos, vol_mult, regime_mult)]
+
+    return strategy
