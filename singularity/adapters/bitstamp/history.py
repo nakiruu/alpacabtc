@@ -106,7 +106,10 @@ class BitstampHistoryClient:
         current_start = int(start.timestamp())
         end_ts = int(end.timestamp())
 
-        # Bounded loop as a defense against pathological pagination
+        # PAGINATION NOTE: passing BOTH `start` AND `end` to Bitstamp returns
+        # the LAST `limit` bars ending at `end` — effectively ignoring `start`.
+        # We pass only `start` per call and filter end locally to get real
+        # forward pagination.
         for _ in range(50):
             if current_start >= end_ts:
                 break
@@ -114,7 +117,6 @@ class BitstampHistoryClient:
                 "step": step,
                 "limit": 1000,
                 "start": current_start,
-                "end": end_ts,
             }
             r = await self._client.get(f"/api/v2/ohlc/{bs_symbol}/", params=params)
             r.raise_for_status()
@@ -134,7 +136,6 @@ class BitstampHistoryClient:
                     close=float(row["close"]),
                     volume=float(row.get("volume", 0.0)),
                 ))
-            # Advance past the last returned bar
             last_ts = int(page_bars[-1]["timestamp"])
             if last_ts <= current_start:
                 break
