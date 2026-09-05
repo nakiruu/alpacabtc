@@ -1,16 +1,20 @@
-"""Kraken historical OHLC — US-accessible long-history BTC/USD source.
+"""Kraken historical OHLC — recent-bars source only.
 
-Binance's `api.binance.com` geo-blocks US IPs (HTTP 451). Binance.US only
-started listing BTC in 2019. Kraken has BTC/USD data back to 2013 and no US
-geo-restriction, making it the natural extended-history source for the harness.
+**IMPORTANT LIMITATION**: Kraken's public OHLC endpoint returns at most 720
+bars per call and pagination does NOT actually walk backward — the `since`
+parameter is a filter, not a cursor. In practice you'll get the last ~720
+bars regardless of the `since` value you send. For daily bars that's ~2 years
+of history, not the decade you might want for Phase 4 gate evaluation.
+
+Going further back requires Kraken's paid Trade History endpoint (needs an
+API key and account). For free-tier extended history, use
+`singularity.adapters.cryptocompare` instead.
 
     GET https://api.kraken.com/0/public/OHLC?pair=XBTUSD&interval=1440&since=<unix_s>
 
-Returns up to 720 bars per call. Pagination via the `last` field returned in
-the response (used as next `since`). Symbol naming is quirky — Kraken has
-legacy prefixes (XXBTZUSD) and modern short forms (XBTUSD). We use the short
-form on request; on response the JSON key may still come back in either form,
-so we grab whichever key isn't "last".
+Symbol naming is quirky — Kraken has legacy prefixes (XXBTZUSD) and modern
+short forms (XBTUSD). We use the short form on request; response key may still
+come back in either form, so we grab whichever key isn't "last".
 """
 
 from __future__ import annotations
@@ -18,6 +22,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import warnings
 from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -145,6 +150,21 @@ class KrakenHistoryClient:
             seen.add(b.ts)
             deduped.append(b)
         deduped.sort(key=lambda b: b.ts)
+
+        # If the returned range is far shorter than requested, warn loudly —
+        # Kraken's 720-bar cap silently drops earlier data.
+        if deduped:
+            requested_days = (end - start).days
+            got_days = (deduped[-1].ts - deduped[0].ts).days
+            if requested_days > got_days * 1.5 and requested_days > 30:
+                warnings.warn(
+                    f"Kraken returned {len(deduped)} bars covering "
+                    f"{deduped[0].ts.date()} → {deduped[-1].ts.date()} "
+                    f"({got_days}d), but you requested {start.date()} → {end.date()} "
+                    f"({requested_days}d). Kraken's free OHLC endpoint caps at ~720 "
+                    "bars. Use --data-source cryptocompare for full history.",
+                    stacklevel=2,
+                )
         return deduped
 
 
