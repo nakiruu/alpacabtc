@@ -37,6 +37,7 @@ from ..adapters.kraken.history import KrakenHistoryClient
 from ..adapters.kraken.history import load_bars_cached as load_kraken_cached
 from ..logs import get_logger
 from ..signals.tsmom import tsmom as _make_tsmom
+from ..signals.tsmom import tsmom_full as _make_tsmom_full
 from ..signals.tsmom import tsmom_voltarget as _make_tsmom_voltarget
 from .backtest import (
     BacktestResult,
@@ -61,6 +62,7 @@ STRATEGIES = {
     # factories (need config); resolved in _run based on CLI flags.
     "tsmom": None,
     "tsmom_voltarget": None,
+    "tsmom_full": None,
 }
 
 
@@ -119,20 +121,35 @@ async def _run(args) -> int:
     settings = get_settings()
     configure_logging(settings.log_level)
 
-    if args.strategy in ("tsmom", "tsmom_voltarget"):
+    if args.strategy in ("tsmom", "tsmom_voltarget", "tsmom_full"):
         lookbacks = tuple(int(x) for x in args.tsmom_lookbacks.split(","))
         if args.strategy == "tsmom":
             strategy = _make_tsmom(
                 lookbacks=lookbacks, enter=args.tsmom_enter, exit_=args.tsmom_exit,
             )
-        else:
+        elif args.strategy == "tsmom_voltarget":
             strategy = _make_tsmom_voltarget(
                 lookbacks=lookbacks, enter=args.tsmom_enter, exit_=args.tsmom_exit,
                 target_vol=args.target_vol, vol_lookback=args.vol_lookback,
                 rebalance_band=args.rebalance_band,
             )
+        else:  # tsmom_full
+            strategy = _make_tsmom_full(
+                lookbacks=lookbacks, enter=args.tsmom_enter, exit_=args.tsmom_exit,
+                target_vol=args.target_vol, vol_lookback=args.vol_lookback,
+                rebalance_band=args.rebalance_band,
+                regime_vol_lookback=args.regime_vol_lookback,
+                regime_baseline_lookback=args.regime_baseline_lookback,
+                regime_threshold_ratio=args.regime_threshold_ratio,
+                regime_risk_off_multiplier=args.regime_risk_off_multiplier,
+                regime_sticky_bars=args.regime_sticky_bars,
+            )
         if args.warmup_bars == 0:
-            args.warmup_bars = max(lookbacks) + max(10, args.vol_lookback)
+            args.warmup_bars = max(
+                max(lookbacks),
+                args.vol_lookback,
+                args.regime_baseline_lookback,
+            ) + 10
     else:
         strategy = STRATEGIES[args.strategy]
 
@@ -333,6 +350,16 @@ def main() -> None:
                         help="Bars for realized-vol estimate (default 30)")
     parser.add_argument("--rebalance-band", type=float, default=0.15,
                         help="Vol-target: only rebalance when |Δ multiplier| > this (default 0.15)")
+    parser.add_argument("--regime-vol-lookback", type=int, default=30,
+                        help="Regime gate: bars for current-vol estimate (default 30)")
+    parser.add_argument("--regime-baseline-lookback", type=int, default=180,
+                        help="Regime gate: bars for baseline vol median (default 180)")
+    parser.add_argument("--regime-threshold-ratio", type=float, default=1.5,
+                        help="Regime gate: trigger risk-off when current > this × baseline (default 1.5)")
+    parser.add_argument("--regime-risk-off-multiplier", type=float, default=0.5,
+                        help="Regime gate: exposure during risk-off (default 0.5)")
+    parser.add_argument("--regime-sticky-bars", type=int, default=20,
+                        help="Regime gate: minimum bars to stay risk-off before allowing exit (default 20)")
     args = parser.parse_args()
     sys.exit(asyncio.run(_run(args)))
 

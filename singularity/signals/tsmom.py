@@ -148,3 +148,46 @@ def tsmom_voltarget(
         return [t * m for t, m in zip(tsmom_pos, mult)]
 
     return strategy
+
+
+def tsmom_full(
+    lookbacks: tuple[int, ...] = DEFAULT_LOOKBACKS,
+    enter: float = DEFAULT_ENTER,
+    exit_: float = DEFAULT_EXIT,
+    target_vol: float = 0.40,
+    vol_lookback: int = 30,
+    rebalance_band: float = 0.15,
+    regime_vol_lookback: int = 30,
+    regime_baseline_lookback: int = 180,
+    regime_threshold_ratio: float = 1.5,
+    regime_risk_off_multiplier: float = 0.5,
+    regime_sticky_bars: int = 20,
+) -> Strategy:
+    """Full plan §6 composition: tsmom_signal × vol_target × regime_gate.
+
+    Position at bar i = tsmom_i × vol_mult_i × regime_mult_i.
+      * tsmom decides DIRECTION (0 or 1 long)
+      * vol_target scales to target realized vol
+      * regime clamps to risk_off_multiplier when current vol >> baseline
+    """
+    from ..overlays.regime import regime_gate_multipliers
+    from ..overlays.voltarget import vol_target_multipliers
+    tsmom_strat = tsmom(lookbacks, enter, exit_)
+
+    def strategy(bars: list[Bar]) -> list[float]:
+        tsmom_pos = tsmom_strat(bars)
+        vol_mult = vol_target_multipliers(
+            bars, target_annualized=target_vol,
+            vol_lookback=vol_lookback, rebalance_band=rebalance_band,
+        )
+        regime_mult = regime_gate_multipliers(
+            bars,
+            vol_lookback=regime_vol_lookback,
+            baseline_lookback=regime_baseline_lookback,
+            vol_threshold_ratio=regime_threshold_ratio,
+            risk_off_multiplier=regime_risk_off_multiplier,
+            sticky_bars=regime_sticky_bars,
+        )
+        return [t * v * r for t, v, r in zip(tsmom_pos, vol_mult, regime_mult)]
+
+    return strategy
