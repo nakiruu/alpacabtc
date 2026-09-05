@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import signal as sig_mod
 import sys
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -100,8 +101,20 @@ async def paper_tick(
     heartbeat_max_age_s: float = 90.0,
     ladder_config: LadderConfig | None = None,
     cache_dir: Path = Path("./state/bars"),
+    idempotency_mode: str = "daily",  # "daily" | "drift"
+    min_notional_delta: float | None = None,
 ) -> int:
-    """Execute one signal-driven tick. Returns exit code."""
+    """Execute one signal-driven tick. Returns exit code.
+
+    idempotency_mode:
+      "daily" — once per (symbol, UTC-day). Right for cron-once-daily.
+      "drift" — no daily block; rely on min_notional_delta to prevent churn.
+                Right for continuous-daemon operation.
+
+    min_notional_delta — override the $10 Alpaca minimum. In daemon mode,
+    raise this to (say) $50 so intraday micro-drifts don't churn.
+    """
+    min_delta = min_notional_delta if min_notional_delta is not None else ALPACA_MIN_NOTIONAL_USD
     from ..config import get_settings
     settings = get_settings()
     store = StateStore(Path(settings.state_db_path))
@@ -143,22 +156,29 @@ async def paper_tick(
                       age_s=age, threshold_s=heartbeat_max_age_s)
             return 2
 
-        # 4. Idempotency
-        if _already_ticked_today(store, symbol, now):
+        # 4. Idempotency (daily mode only)
+        if idempotency_mode == "daily" and _already_ticked_today(store, symbol, now):
             log.info("paper_tick_already_ticked_today", symbol=symbol,
                      date=_today_utc_date_str(now))
             return 0
 
         # 5. Fetch bars — use Alpaca (same venue we trade on)
+        # Round `end` to midnight so cache key stays stable within a UTC day.
+        # Daily bars only get a new value once per UTC midnight, so intraday
+        # re-fetching returns the same data anyway.
         start = now - timedelta(days=bars_lookback_days)
+        end = (now + timedelta(days=1)).replace(
+            hour=0, minute=0, second=0, microsecond=0
+        )
         try:
             async with HistoryClient(
                 api_key=settings.alpaca_api_key,
                 secret_key=settings.alpaca_secret_key,
             ) as hc:
                 bars = await load_bars_cached(
-                    hc, symbol, start, now, cache_dir,
-                    timeframe="1Day", force_refresh=True,
+                    hc, symbol, start, end, cache_dir,
+                    timeframe="1Day",
+                    force_refresh=False,  # cache hit within same UTC day
                 )
         except Exception:
             log.exception("paper_tick_bar_fetch_failed", symbol=symbol)
@@ -224,10 +244,10 @@ async def paper_tick(
             }
             log.info("paper_tick_decision", **decision)
 
-            if notional_delta < ALPACA_MIN_NOTIONAL_USD:
+            if notional_delta < min_delta:
                 log.info("paper_tick_below_min_notional",
                          notional=notional_delta,
-                         min_required=ALPACA_MIN_NOTIONAL_USD)
+                         min_required=min_delta)
                 return 0
 
             if delta_btc == 0.0:
@@ -252,8 +272,9 @@ async def paper_tick(
                     t3_s=settings.passive_t3_s,
                 ),
             )
-            # Pre-seed a stamped id so idempotency works even before fills land
-            _pre_stamp_intent(store, symbol, side, now)
+            # Pre-seed a stamped id (daily-mode idempotency); no-op if drift-mode
+            if idempotency_mode == "daily":
+                _pre_stamp_intent(store, symbol, side, now)
 
             result = await ladder.execute(side=side, symbol=symbol, qty=qty)
 
@@ -300,9 +321,64 @@ def _pre_stamp_intent(store: StateStore, symbol: str, side: Side, now: datetime)
         log.warning("paper_tick_prestamp_failed", intent_id=intent_id)
 
 
+async def paper_loop(
+    *,
+    symbol: str,
+    interval_s: float,
+    min_notional_delta: float,
+    bars_lookback_days: int,
+    heartbeat_max_age_s: float,
+    cache_dir: Path,
+) -> None:
+    """Long-running daemon: re-evaluate signal every interval_s and act on drift.
+
+    Uses `drift` idempotency mode — no daily block, but the min_notional_delta
+    gate prevents churn when the strategy weight × current price is close to
+    the actual position. Signal itself only changes when a new daily bar
+    rolls (00:00 UTC); intraday ticks re-check whether current position drifted
+    from target (e.g. because equity moved during a big price change).
+    """
+    stop = asyncio.Event()
+
+    def _handle_stop() -> None:
+        log.info("paper_loop_stop_requested")
+        stop.set()
+
+    loop = asyncio.get_running_loop()
+    for s in (sig_mod.SIGINT, sig_mod.SIGTERM):
+        try:
+            loop.add_signal_handler(s, _handle_stop)
+        except NotImplementedError:
+            sig_mod.signal(s, lambda *_: _handle_stop())
+
+    log.info("paper_loop_starting", symbol=symbol, interval_s=interval_s,
+             min_notional_delta=min_notional_delta)
+    tick_n = 0
+    while not stop.is_set():
+        tick_n += 1
+        log.info("paper_loop_tick_begin", tick=tick_n)
+        try:
+            await paper_tick(
+                symbol=symbol,
+                bars_lookback_days=bars_lookback_days,
+                dry_run=False,
+                heartbeat_max_age_s=heartbeat_max_age_s,
+                cache_dir=cache_dir,
+                idempotency_mode="drift",
+                min_notional_delta=min_notional_delta,
+            )
+        except Exception:
+            log.exception("paper_loop_tick_error", tick=tick_n)
+        try:
+            await asyncio.wait_for(stop.wait(), timeout=interval_s)
+        except TimeoutError:
+            continue
+    log.info("paper_loop_stopped", ticks=tick_n)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Daily signal-driven paper trading tick"
+        description="Signal-driven paper trading — one-shot (cron) or --daemon"
     )
     parser.add_argument("--symbol", default="BTC/USD",
                         help="Symbol to trade (default BTC/USD)")
@@ -313,6 +389,15 @@ def main() -> None:
     parser.add_argument("--heartbeat-max-age-s", type=float, default=90.0,
                         help="Refuse to trade if executor heartbeat older than this (default 90s)")
     parser.add_argument("--cache-dir", default="./state/bars")
+    parser.add_argument("--daemon", action="store_true",
+                        help="Continuous mode: loop every --interval-s using drift idempotency")
+    parser.add_argument("--interval-s", type=float, default=900.0,
+                        help="Daemon-mode tick interval in seconds (default 900 = 15 min)")
+    parser.add_argument("--min-notional-delta", type=float, default=None,
+                        help="Override min notional for a rebalance (default $10; suggest $50+ in daemon)")
+    parser.add_argument("--idempotency-mode", choices=["daily", "drift"], default=None,
+                        help="'daily' = once per UTC day (cron), 'drift' = every tick (daemon). "
+                             "Defaults to 'drift' when --daemon is set, else 'daily'.")
     args = parser.parse_args()
 
     from ..config import get_settings
@@ -320,12 +405,28 @@ def main() -> None:
     settings = get_settings()
     configure_logging(settings.log_level)
 
+    if args.daemon:
+        # Sensible default for daemon: raise min notional to prevent churn
+        min_delta = args.min_notional_delta if args.min_notional_delta is not None else 50.0
+        asyncio.run(paper_loop(
+            symbol=args.symbol,
+            interval_s=args.interval_s,
+            min_notional_delta=min_delta,
+            bars_lookback_days=args.bars_lookback_days,
+            heartbeat_max_age_s=args.heartbeat_max_age_s,
+            cache_dir=Path(args.cache_dir),
+        ))
+        sys.exit(0)
+
+    idempotency = args.idempotency_mode or "daily"
     exit_code = asyncio.run(paper_tick(
         symbol=args.symbol,
         bars_lookback_days=args.bars_lookback_days,
         dry_run=args.dry_run,
         heartbeat_max_age_s=args.heartbeat_max_age_s,
         cache_dir=Path(args.cache_dir),
+        idempotency_mode=idempotency,
+        min_notional_delta=args.min_notional_delta,
     ))
     sys.exit(exit_code)
 

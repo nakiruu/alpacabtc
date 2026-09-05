@@ -87,3 +87,23 @@ services:
       - ./logs:/app/logs
     command: ["watchdog"]
     restart: unless-stopped
+
+  signal-daemon:
+    build: .
+    image: singularity-capture:latest
+    container_name: singularity-signal-daemon
+    user: "99:100"
+    depends_on:
+      influxdb:
+        condition: service_healthy
+      influx-init:
+        condition: service_completed_successfully
+    env_file:
+      - .env
+    environment:
+      INFLUX_URL: http://influxdb:8086
+    volumes:
+      - ./state:/app/state
+      - ./logs:/app/logs
+    command: ["paper-tick", "--daemon", "--interval-s", "900", "--min-notional-delta", "50"]
+    restart: unless-stopped
