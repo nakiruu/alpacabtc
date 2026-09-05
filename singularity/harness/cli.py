@@ -39,6 +39,7 @@ from ..logs import get_logger
 from ..signals.tsmom import tsmom as _make_tsmom
 from ..signals.tsmom import tsmom_full as _make_tsmom_full
 from ..signals.tsmom import tsmom_voltarget as _make_tsmom_voltarget
+from .diagnose import compute_fold_diagnostic, print_diagnostic
 from .backtest import (
     BacktestResult,
     buy_and_hold,
@@ -227,6 +228,9 @@ async def _run(args) -> int:
     )
     _print_report(result)
 
+    # ---- Fold diagnostics ----
+    _maybe_print_diagnostics(args, bars, splitter, result)
+
     # ---- Bootstrap vs buy-and-hold benchmark ----
     if args.vs_benchmark != "none" and args.strategy != args.vs_benchmark:
         bench = STRATEGIES[args.vs_benchmark]
@@ -272,6 +276,57 @@ async def _run(args) -> int:
         return 0 if gate_pass else 1
 
     return 0
+
+
+def _maybe_print_diagnostics(args, bars, splitter, result: BacktestResult) -> None:
+    """Dump per-fold diagnostic reports if --diagnose-fold or --diagnose-worst set."""
+    fold_indices_to_diagnose: list[int] = []
+    if args.diagnose_worst > 0:
+        # Pick the N folds with worst net Sharpe
+        ranked = sorted(
+            result.per_fold,
+            key=lambda f: f.net_metrics.annualized_sharpe,
+        )[:args.diagnose_worst]
+        fold_indices_to_diagnose.extend(f.fold.index for f in ranked)
+    if args.diagnose_fold:
+        # comma-separated list of fold indices
+        for x in args.diagnose_fold.split(","):
+            x = x.strip()
+            if x:
+                fold_indices_to_diagnose.append(int(x))
+
+    if not fold_indices_to_diagnose:
+        return
+
+    # Only tsmom_full/voltarget need the extra knobs; for other strategies the
+    # diagnostic still runs but the vol/regime numbers reflect what tsmom_full
+    # WOULD have done — not what the actual strategy did. Add a warning.
+    if args.strategy not in ("tsmom", "tsmom_voltarget", "tsmom_full"):
+        print(f"\n[warn] --diagnose-* recomputes tsmom_full signals regardless of --strategy; "
+              f"per-bar breakdown for {args.strategy!r} won't match its actual positions")
+
+    lookbacks = tuple(int(x) for x in args.tsmom_lookbacks.split(","))
+    folds = splitter.folds(len(bars))
+    fold_by_idx = {f.index: f for f in folds}
+
+    print("\n=== fold diagnostics ===")
+    for idx in dict.fromkeys(fold_indices_to_diagnose):   # dedupe, preserve order
+        fold = fold_by_idx.get(idx)
+        if fold is None:
+            print(f"[warn] fold {idx} not in result ({len(folds)} total)")
+            continue
+        diag = compute_fold_diagnostic(
+            all_bars=bars, fold=fold, warmup_bars=args.warmup_bars,
+            lookbacks=lookbacks, enter=args.tsmom_enter, exit_=args.tsmom_exit,
+            target_vol=args.target_vol, vol_lookback=args.vol_lookback,
+            rebalance_band=args.rebalance_band,
+            regime_vol_lookback=args.regime_vol_lookback,
+            regime_baseline_lookback=args.regime_baseline_lookback,
+            regime_threshold_ratio=args.regime_threshold_ratio,
+            regime_risk_off_multiplier=args.regime_risk_off_multiplier,
+            regime_sticky_bars=args.regime_sticky_bars,
+        )
+        print_diagnostic(diag)
 
 
 def _print_bootstrap_section(
@@ -360,6 +415,10 @@ def main() -> None:
                         help="Regime gate: exposure during risk-off (default 0.5)")
     parser.add_argument("--regime-sticky-bars", type=int, default=20,
                         help="Regime gate: minimum bars to stay risk-off before allowing exit (default 20)")
+    parser.add_argument("--diagnose-fold", default="",
+                        help="Comma-separated fold indices to print per-bar diagnostics for (e.g. '12,21,29')")
+    parser.add_argument("--diagnose-worst", type=int, default=0,
+                        help="Diagnose the N worst-Sharpe folds automatically")
     args = parser.parse_args()
     sys.exit(asyncio.run(_run(args)))
 
