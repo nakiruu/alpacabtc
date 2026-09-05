@@ -27,6 +27,8 @@ from ..adapters.alpaca_crypto.history import HistoryClient
 from ..adapters.alpaca_crypto.history import load_bars_cached as load_alpaca_cached
 from ..adapters.binance.history import BinanceHistoryClient
 from ..adapters.binance.history import load_bars_cached as load_binance_cached
+from ..adapters.coingecko.history import CoinGeckoHistoryClient
+from ..adapters.coingecko.history import load_bars_cached as load_cg_cached
 from ..adapters.cryptocompare.history import CryptoCompareHistoryClient
 from ..adapters.cryptocompare.history import load_bars_cached as load_cc_cached
 from ..adapters.kraken.history import KrakenHistoryClient
@@ -158,8 +160,14 @@ async def _run(args) -> int:
                 timeframe=args.timeframe, force_refresh=args.refresh,
             )
     elif args.data_source == "cryptocompare":
-        async with CryptoCompareHistoryClient() as hc:
+        async with CryptoCompareHistoryClient(api_key=settings.cryptocompare_api_key or None) as hc:
             bars = await load_cc_cached(
+                hc, args.symbol, start, end, cache_dir,
+                timeframe=args.timeframe, force_refresh=args.refresh,
+            )
+    elif args.data_source == "coingecko":
+        async with CoinGeckoHistoryClient() as hc:
+            bars = await load_cg_cached(
                 hc, args.symbol, start, end, cache_dir,
                 timeframe=args.timeframe, force_refresh=args.refresh,
             )
@@ -278,10 +286,12 @@ def main() -> None:
     parser.add_argument("--spread-bps", type=float, default=3.0,
                         help="Stylized book spread in bps (default 3, matches live BTC/USD)")
     parser.add_argument("--data-source", default="alpaca",
-                        choices=["alpaca", "binance", "binance-us", "kraken", "cryptocompare"],
-                        help="alpaca (2022+); binance (2017+, US-blocked); "
-                             "binance-us (2019+); kraken (LAST ~720 BARS ONLY); "
-                             "cryptocompare (BTC/USD 2013+ — RECOMMENDED for US users)")
+                        choices=["alpaca", "binance", "binance-us", "kraken",
+                                 "cryptocompare", "coingecko"],
+                        help="alpaca (2022+); binance (US-blocked); binance-us (2019+); "
+                             "kraken (LAST ~720 BARS ONLY); "
+                             "cryptocompare (needs API key); "
+                             "coingecko (2013+, close-only, NO AUTH — RECOMMENDED)")
     parser.add_argument("--cache-dir", default="./state/bars")
     parser.add_argument("--refresh", action="store_true", help="Ignore cache, re-fetch bars")
     parser.add_argument("--train-bars", type=int, default=360)

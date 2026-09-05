@@ -1,19 +1,22 @@
-"""CryptoCompare historical OHLC — the long-history free-tier source.
+"""CryptoCompare historical OHLC — long-history source with free-tier API key.
 
-Why this exists: Kraken's free OHLC endpoint returns only the last 720 bars
-regardless of `since` (a hard API limit — pagination requires their paid Trade
-History endpoint). CryptoCompare's `histoday` endpoint returns 2000 bars per
-call with real pagination via `toTs`, giving us BTC/USD from ~2013 to today
-without an API key.
+**Requires an API key** (as of the tightening in their free tier). Sign up at
+https://www.cryptocompare.com/coins/guides/how-to-use-our-api/ to get one,
+then set `CRYPTOCOMPARE_API_KEY` in your `.env`. If no key is set, requests
+return 401.
+
+For a no-auth alternative, use `singularity.adapters.coingecko`, which uses
+CoinGecko's free public endpoint (close prices only — no OHLC).
 
     GET https://min-api.cryptocompare.com/data/v2/histoday
         ?fsym=BTC&tsym=USD&limit=2000&toTs=<unix_end_seconds>
+        [&api_key=<free-tier-key>]
 
 Response returns bars ascending in time. To go further back, use the FIRST
 returned bar's timestamp minus one day as the next `toTs`. Iterate until
 we've covered the requested start.
 
-Rate limits: ~100k requests/month on the free tier — we make ~3 requests for
+Rate limits: 100k requests/month on the free tier — we make ~3 requests for
 a decade of daily bars, well within budget.
 """
 
@@ -49,7 +52,13 @@ def _split_symbol(pair: str) -> tuple[str, str]:
 class CryptoCompareHistoryClient:
     BASE_URL = "https://min-api.cryptocompare.com"
 
-    def __init__(self, base_url: str | None = None, timeout_s: float = 30.0) -> None:
+    def __init__(
+        self,
+        api_key: str | None = None,
+        base_url: str | None = None,
+        timeout_s: float = 30.0,
+    ) -> None:
+        self._api_key = api_key
         self._base_url = base_url or self.BASE_URL
         self._timeout_s = timeout_s
         self._client: httpx.AsyncClient | None = None
@@ -60,9 +69,15 @@ class CryptoCompareHistoryClient:
             self._client = None
 
     async def __aenter__(self) -> "CryptoCompareHistoryClient":
+        # CryptoCompare accepts the API key either as a query param
+        # (`api_key=...`) or as an `Authorization: Apikey <key>` header. We use
+        # the header form so it applies to every request without leaking into logs.
+        headers = {"Accept": "application/json"}
+        if self._api_key:
+            headers["Authorization"] = f"Apikey {self._api_key}"
         self._client = httpx.AsyncClient(
             base_url=self._base_url,
-            headers={"Accept": "application/json"},
+            headers=headers,
             timeout=self._timeout_s,
         )
         return self

@@ -34,6 +34,8 @@ class Settings(BaseSettings):
     book_feature_cadence_s: float = 1.0
     log_level: str = "INFO"
 
+    cryptocompare_api_key: str = ""
+
     state_db_path: str = "./state/singularity.db"
     executor_heartbeat_s: float = 15.0
     passive_t1_s: float = 10.0
