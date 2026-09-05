@@ -8,12 +8,14 @@ The landscape as of 2026:
     * CoinGecko       — free tier now requires API key
     * Bitstamp        — public endpoints STILL free, no auth (verified 2026)
 
-Bitstamp has been trading BTC/USD since 2011, so we get ~15 years of daily
-history. Pagination via `start`/`end`/`limit` is real (not a filter), and
-`limit=1000` per request means ~5 calls for a decade of data.
+Timeframes and typical fetch sizes:
+    1Day   → ~15 years of history = ~5,500 bars = ~6 API pages
+    1Hour  → 2 years of history   = ~17,500 bars = ~18 pages
+    1Min   → 2 years of history   = ~1.05M bars = ~1050 pages (~2-5 min at
+             100ms courtesy delay). Cache once, then reads are instant.
 
     GET https://www.bitstamp.net/api/v2/ohlc/btcusd/
-        ?step=86400&limit=1000&start=<unix_s>&end=<unix_s>
+        ?step=<seconds>&limit=1000&start=<unix_s>
 
 Bitstamp's symbol notation is compact lowercase without separator:
 BTC/USD → btcusd, ETH/USD → ethusd, ETH/BTC → ethbtc.
@@ -21,6 +23,7 @@ BTC/USD → btcusd, ETH/USD → ethusd, ETH/BTC → ethbtc.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import os
@@ -31,6 +34,31 @@ from pathlib import Path
 import httpx
 
 from ..alpaca_crypto.history import Bar
+from ...logs import get_logger
+
+log = get_logger(__name__)
+
+
+# Courtesy delay between paginated requests. Bitstamp doesn't document a
+# strict rate limit for public endpoints, but ~100 ms between calls keeps
+# us well under any sane threshold and safe from IP throttling if their
+# policy changes.
+_PAGE_THROTTLE_S = 0.10
+
+# Per-page bar limit that Bitstamp enforces
+_PAGE_LIMIT = 1000
+
+# Max pages we'll walk before bailing. At 1000 bars/page:
+#   * 1Day  → 3000 pages = ~8000 years (defensive infinity)
+#   * 1Hour → 3000 pages = ~340 years   (defensive infinity)
+#   * 1Min  → 3000 pages = ~5.7 years   (right-sized)
+# The loop exits earlier when either `end` is reached or a partial page
+# indicates end-of-data. 3000 is the pathological-runaway backstop.
+_MAX_PAGES = 3000
+
+# Log progress every N pages during long fetches so the user knows the
+# process is alive
+_PROGRESS_EVERY_PAGES = 20
 
 
 _BITSTAMP_SYMBOL_MAP = {
@@ -110,12 +138,13 @@ class BitstampHistoryClient:
         # the LAST `limit` bars ending at `end` — effectively ignoring `start`.
         # We pass only `start` per call and filter end locally to get real
         # forward pagination.
-        for _ in range(50):
+        pages_fetched = 0
+        for page_i in range(_MAX_PAGES):
             if current_start >= end_ts:
                 break
             params = {
                 "step": step,
-                "limit": 1000,
+                "limit": _PAGE_LIMIT,
                 "start": current_start,
             }
             r = await self._client.get(f"/api/v2/ohlc/{bs_symbol}/", params=params)
@@ -140,8 +169,35 @@ class BitstampHistoryClient:
             if last_ts <= current_start:
                 break
             current_start = last_ts + step
-            if len(page_bars) < 1000:
+            pages_fetched += 1
+
+            # Progress logging for long intraday fetches
+            if pages_fetched % _PROGRESS_EVERY_PAGES == 0:
+                progress_pct = min(
+                    100.0,
+                    (current_start - int(start.timestamp()))
+                    / max(1, end_ts - int(start.timestamp())) * 100.0,
+                )
+                log.info(
+                    "bitstamp_pagination_progress",
+                    symbol=symbol, timeframe=timeframe,
+                    pages=pages_fetched, bars_so_far=len(out),
+                    approx_progress_pct=round(progress_pct, 1),
+                )
+
+            if len(page_bars) < _PAGE_LIMIT:
                 break
+
+            # Courtesy throttle — do NOT delay on the FIRST page (fast path
+            # for small ranges) or when we're about to exit anyway.
+            await asyncio.sleep(_PAGE_THROTTLE_S)
+
+        if pages_fetched >= _MAX_PAGES:
+            log.warning(
+                "bitstamp_pagination_hit_max",
+                symbol=symbol, timeframe=timeframe, max_pages=_MAX_PAGES,
+                note="range may be truncated; consider narrowing start/end",
+            )
 
         # Dedupe by ts, sort ascending
         seen: set[datetime] = set()
