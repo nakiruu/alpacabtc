@@ -27,6 +27,8 @@ from ..adapters.alpaca_crypto.history import HistoryClient
 from ..adapters.alpaca_crypto.history import load_bars_cached as load_alpaca_cached
 from ..adapters.binance.history import BinanceHistoryClient
 from ..adapters.binance.history import load_bars_cached as load_binance_cached
+from ..adapters.cryptocompare.history import CryptoCompareHistoryClient
+from ..adapters.cryptocompare.history import load_bars_cached as load_cc_cached
 from ..adapters.kraken.history import KrakenHistoryClient
 from ..adapters.kraken.history import load_bars_cached as load_kraken_cached
 from ..logs import get_logger
@@ -155,6 +157,12 @@ async def _run(args) -> int:
                 hc, args.symbol, start, end, cache_dir,
                 timeframe=args.timeframe, force_refresh=args.refresh,
             )
+    elif args.data_source == "cryptocompare":
+        async with CryptoCompareHistoryClient() as hc:
+            bars = await load_cc_cached(
+                hc, args.symbol, start, end, cache_dir,
+                timeframe=args.timeframe, force_refresh=args.refresh,
+            )
     else:
         async with HistoryClient(
             api_key=settings.alpaca_api_key, secret_key=settings.alpaca_secret_key
@@ -270,9 +278,10 @@ def main() -> None:
     parser.add_argument("--spread-bps", type=float, default=3.0,
                         help="Stylized book spread in bps (default 3, matches live BTC/USD)")
     parser.add_argument("--data-source", default="alpaca",
-                        choices=["alpaca", "binance", "binance-us", "kraken"],
-                        help="alpaca (BTC/USD, 2022+); binance (2017+, US-blocked); "
-                             "binance-us (2019+); kraken (BTC/USD, 2013+ — RECOMMENDED for US users)")
+                        choices=["alpaca", "binance", "binance-us", "kraken", "cryptocompare"],
+                        help="alpaca (2022+); binance (2017+, US-blocked); "
+                             "binance-us (2019+); kraken (LAST ~720 BARS ONLY); "
+                             "cryptocompare (BTC/USD 2013+ — RECOMMENDED for US users)")
     parser.add_argument("--cache-dir", default="./state/bars")
     parser.add_argument("--refresh", action="store_true", help="Ignore cache, re-fetch bars")
     parser.add_argument("--train-bars", type=int, default=360)
