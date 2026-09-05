@@ -27,6 +27,8 @@ from ..adapters.alpaca_crypto.history import HistoryClient
 from ..adapters.alpaca_crypto.history import load_bars_cached as load_alpaca_cached
 from ..adapters.binance.history import BinanceHistoryClient
 from ..adapters.binance.history import load_bars_cached as load_binance_cached
+from ..adapters.kraken.history import KrakenHistoryClient
+from ..adapters.kraken.history import load_bars_cached as load_kraken_cached
 from ..logs import get_logger
 from ..signals.tsmom import tsmom as _make_tsmom
 from ..signals.tsmom import tsmom_voltarget as _make_tsmom_voltarget
@@ -138,6 +140,18 @@ async def _run(args) -> int:
     if args.data_source == "binance":
         async with BinanceHistoryClient() as hc:
             bars = await load_binance_cached(
+                hc, args.symbol, start, end, cache_dir,
+                timeframe=args.timeframe, force_refresh=args.refresh,
+            )
+    elif args.data_source == "binance-us":
+        async with BinanceHistoryClient(base_url="https://api.binance.us") as hc:
+            bars = await load_binance_cached(
+                hc, args.symbol, start, end, cache_dir,
+                timeframe=args.timeframe, force_refresh=args.refresh,
+            )
+    elif args.data_source == "kraken":
+        async with KrakenHistoryClient() as hc:
+            bars = await load_kraken_cached(
                 hc, args.symbol, start, end, cache_dir,
                 timeframe=args.timeframe, force_refresh=args.refresh,
             )
@@ -255,8 +269,10 @@ def main() -> None:
                              "none=cost-free (batch 3.1 behavior)")
     parser.add_argument("--spread-bps", type=float, default=3.0,
                         help="Stylized book spread in bps (default 3, matches live BTC/USD)")
-    parser.add_argument("--data-source", default="alpaca", choices=["alpaca", "binance"],
-                        help="alpaca (BTC/USD, 2022+) vs binance (BTC/USDT proxy, 2017+)")
+    parser.add_argument("--data-source", default="alpaca",
+                        choices=["alpaca", "binance", "binance-us", "kraken"],
+                        help="alpaca (BTC/USD, 2022+); binance (2017+, US-blocked); "
+                             "binance-us (2019+); kraken (BTC/USD, 2013+ — RECOMMENDED for US users)")
     parser.add_argument("--cache-dir", default="./state/bars")
     parser.add_argument("--refresh", action="store_true", help="Ignore cache, re-fetch bars")
     parser.add_argument("--train-bars", type=int, default=360)
